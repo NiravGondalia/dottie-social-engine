@@ -1014,7 +1014,7 @@ const _dottieExpanded = new Set(); // activity id strings
 let _dottieFingerprint = '';
 const _dottieById = {};
 
-function _dottieFingerprint(list) {
+function _computeDottieFingerprint(list) {
   return list.map(a => [
     a.id || '',
     a.status || '',
@@ -1050,7 +1050,7 @@ function renderDottieQueue(d) {
     if (localReplies[id] !== undefined) return Object.assign({}, a, { reply_text: localReplies[id] });
     return a;
   });
-  const fp = _dottieFingerprint(d.slice(0,40));
+  const fp = _computeDottieFingerprint(d.slice(0,40));
   if (fp === _dottieFingerprint && el.querySelector('.dottie-card')) return;
   _dottieFingerprint = fp;
   Object.keys(_dottieById).forEach(k => delete _dottieById[k]);
