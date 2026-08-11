@@ -1,35 +1,44 @@
 # =============================================================================
-# Reddit Account Configuration
+# Reddit Account Configuration (non-secret settings only)
 # =============================================================================
+# Credentials come from .env — never put passwords here:
+#   MILO_REDDIT_1_USERNAME=...
+#   MILO_REDDIT_1_PASSWORD=...
+#   MILO_REDDIT_1_CLIENT_ID=...      # optional, for API mode
+#   MILO_REDDIT_1_CLIENT_SECRET=...  # optional
+# Single-account shorthand: MILO_REDDIT_USERNAME / MILO_REDDIT_PASSWORD
+#
 # Auth modes:
 #   "web"  = Cookie-based (recommended — no API app needed)
-#   "api"  = PRAW/OAuth (needs client_id/client_secret)
+#   "api"  = PRAW/OAuth (needs client_id/client_secret in .env)
 # =============================================================================
 
 auth_mode: "web"
 
 accounts:
-  - username: "your_reddit_username"
-    password: "your_reddit_password"
-    client_id: ""
-    client_secret: ""
+  - # Slot 1 → MILO_REDDIT_1_* (or MILO_REDDIT_USERNAME / PASSWORD)
+    username: ""               # filled from env
+    password: ""               # filled from env
+    client_id: ""              # filled from env
+    client_secret: ""          # filled from env
     user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
     cookies_file: "data/cookies/reddit_account1.json"
     enabled: true
     persona: "content_creator"
-    assigned_projects: ["my_project"]
+    assigned_projects: ["Dottie"]
     cooldown_minutes: 10
     max_actions_per_hour: 5
 
-  # - username: "second_account"
-  #   password: "password"
+  # - # Slot 2 → MILO_REDDIT_2_USERNAME / MILO_REDDIT_2_PASSWORD
+  #   username: ""
+  #   password: ""
   #   client_id: ""
   #   client_secret: ""
   #   user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
   #   cookies_file: "data/cookies/reddit_account2.json"
   #   enabled: true
   #   persona: "helpful_casual"
-  #   assigned_projects: ["my_project"]
+  #   assigned_projects: ["Dottie"]
   #   cooldown_minutes: 10
   #   max_actions_per_hour: 5
 

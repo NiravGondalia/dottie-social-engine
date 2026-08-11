@@ -460,6 +460,19 @@ select.form-input{cursor:pointer}
 .intel-filters .btn{font-size:10px;padding:2px 8px;border-radius:4px}
 .btn-xs{font-size:10px!important;padding:2px 8px!important;min-width:auto}
 
+/* ── HITL opportunity cards ── */
+.hitl-card{border:1px solid var(--border);border-radius:10px;margin:8px 0;background:var(--bg2);overflow:hidden}
+.hitl-head{display:flex;align-items:center;gap:8px;padding:10px 12px;cursor:pointer;flex-wrap:wrap}
+.hitl-head:hover{background:rgba(255,255,255,.02)}
+.hitl-why{font-size:11px;color:var(--text3);padding:0 12px 10px;line-height:1.4;cursor:pointer}
+.hitl-chevron{color:var(--text3);font-size:10px;margin-left:auto}
+.hitl-body{padding:0 12px 12px;border-top:1px solid var(--border)}
+.dottie-field{font-size:12px;color:var(--text2);line-height:1.45;white-space:pre-wrap;word-break:break-word}
+.hitl-label{display:block;font-family:var(--font-label);font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin:10px 0 4px}
+.hitl-input{margin-bottom:0!important}
+.hitl-check{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text2);margin:10px 0;cursor:pointer}
+.hitl-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+
 /* ── Global Status Bar ── */
 .global-status-bar{
   background:rgba(0,0,0,.85);border-bottom:1px solid var(--border);

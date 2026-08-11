@@ -13,7 +13,8 @@ import random
 import logging
 import threading
 from datetime import datetime, timezone
-from typing import List, Dict, Optional
+from pathlib import Path
+from typing import List, Dict, Optional, Tuple
 
 import requests
 
@@ -29,6 +30,44 @@ logger = logging.getLogger(__name__)
 _BLOCKED_SUBS: Dict[str, float] = {}  # subreddit_lower -> unblock_timestamp
 _BLOCKED_SUBS_LOCK = threading.Lock()
 _BLOCKED_SUBS_DURATION = 14400  # 4 hours (was 1h -- too aggressive for server IP)
+
+# Persist scan round-robin across CLI runs (process-local alone resets each time)
+_ROTATION_FILE = Path("data/scan_rotation.json")
+_ROTATION_LOCK = threading.Lock()
+
+
+def _load_rotation() -> Dict:
+    try:
+        if _ROTATION_FILE.exists():
+            with open(_ROTATION_FILE) as f:
+                data = json.load(f)
+                return data if isinstance(data, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+
+def _save_rotation(data: Dict) -> None:
+    try:
+        _ROTATION_FILE.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(_ROTATION_FILE.parent), suffix=".tmp")
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, _ROTATION_FILE)
+    except Exception as e:
+        logger.debug(f"scan rotation save failed: {e}")
+
+
+def _rotate_list(items: List[str], key: str) -> Tuple[List[str], int]:
+    """Round-robin rotate a list; persist start index under key. Returns (rotated, start)."""
+    if not items:
+        return [], 0
+    with _ROTATION_LOCK:
+        store = _load_rotation()
+        start = int(store.get(key, 0)) % len(items)
+        store[key] = (start + 1) % len(items)
+        _save_rotation(store)
+    return items[start:] + items[:start], start
 
 # Reddit JSON endpoints (public, no API key needed)
 REDDIT_BASE = "https://www.reddit.com"
@@ -259,17 +298,18 @@ class RedditWebBot(BasePlatform):
         """Scan subreddits using public JSON endpoints.
 
         Multi-strategy scanning:
-        1. Keyword search in each subreddit
+        1. Keyword search in each subreddit (per-sub request budget)
         2. Hot/new listing fallback when keyword search yields few results
         3. Negative keyword filtering
+        4. Optional LLM opportunity discovery filter
 
-        SAFETY: Respects subreddit/keyword limits set by orchestrator.
-        The orchestrator limits to ~4 subreddits and ~3 keywords per cycle.
-        Total requests per scan: ~4 subs × 3 keywords + fallback = ~16 max.
+        SAFETY: Hard cap on total HTTP requests, split evenly across subs
+        so early subs cannot consume the whole budget. Sub + keyword order
+        round-robins across scans (persisted in data/scan_rotation.json).
         """
         opportunities = []
         reddit_config = project.get("reddit", {})
-        keywords = reddit_config.get("keywords", [])
+        keywords = list(reddit_config.get("keywords", []) or [])
         negative_keywords = reddit_config.get("exclude_keywords", [])
         min_score = reddit_config.get("min_post_score", 1)
         max_age_hours = reddit_config.get("max_post_age_hours", 24)
@@ -282,29 +322,58 @@ class RedditWebBot(BasePlatform):
             subreddits.extend(subs.get("primary", []))
             subreddits.extend(subs.get("secondary", []))
         elif isinstance(subs, list):
-            subreddits = subs
+            subreddits = list(subs)
+
+        if not subreddits:
+            logger.warning(f"No target subreddits for {project_name}")
+            return []
 
         seen_ids = set()
         request_count = 0
-        max_requests = 40  # Hard cap on total HTTP requests per scan
+        max_requests = int(reddit_config.get("max_requests_per_scan", 40))
+
+        # Round-robin: rotate which sub/keyword leads each scan
+        subreddits, sub_start = _rotate_list(
+            subreddits, f"subs:{project_name}"
+        )
+        keywords, kw_start = _rotate_list(
+            keywords, f"keywords:{project_name}"
+        ) if keywords else ([], 0)
+
+        # Fair share: each sub gets the same request budget
+        n_subs = len(subreddits)
+        budget_per_sub = max(3, max_requests // n_subs)
+        # Leave room for optional hot/new browse (1–2) when keywords find little
+        kw_slots = max(1, budget_per_sub - 1)
+        keywords_for_scan = keywords[:kw_slots] if keywords else []
+
+        logger.info(
+            f"Scan plan for {project_name}: {n_subs} subs "
+            f"(rotate_start={sub_start}), {len(keywords_for_scan)} keywords/sub "
+            f"(kw_rotate={kw_start}), budget={budget_per_sub}/sub, "
+            f"cap={max_requests} — order={subreddits}"
+        )
 
         # Rotate User-Agent per scan cycle
         self.session.headers["User-Agent"] = _random_ua()
 
         for sub_name in subreddits:
             if request_count >= max_requests:
-                logger.debug(f"Hit request cap ({max_requests}), stopping scan")
+                logger.debug(f"Hit global request cap ({max_requests}), stopping scan")
                 break
 
+            sub_budget_left = min(budget_per_sub, max_requests - request_count)
+            sub_used = 0
             sub_opps = 0
 
-            # Strategy 1: Keyword search
-            for keyword in keywords:
-                if request_count >= max_requests:
+            # Strategy 1: Keyword search (capped by per-sub budget)
+            for keyword in keywords_for_scan:
+                if sub_used >= sub_budget_left or request_count >= max_requests:
                     break
                 try:
                     posts = self._search_subreddit(sub_name, keyword)
                     request_count += 1
+                    sub_used += 1
                     for post in posts:
                         opp = self._process_post(
                             post, sub_name, keyword, project,
@@ -321,13 +390,14 @@ class RedditWebBot(BasePlatform):
                 time.sleep(random.uniform(2.0, 4.0))
 
             # Strategy 2: Browse hot + new if keyword search found few results
-            if sub_opps < 2 and request_count < max_requests:
+            if sub_opps < 2 and sub_used < sub_budget_left and request_count < max_requests:
                 for sort in ("hot", "new"):
-                    if request_count >= max_requests:
+                    if sub_used >= sub_budget_left or request_count >= max_requests:
                         break
                     try:
                         posts = self._browse_subreddit(sub_name, sort, limit=15)
                         request_count += 1
+                        sub_used += 1
                         for post in posts:
                             opp = self._process_post(
                                 post, sub_name, "", project,
@@ -341,15 +411,46 @@ class RedditWebBot(BasePlatform):
                     except Exception as e:
                         logger.debug(f"Browse r/{sub_name}/{sort} fallback failed: {e}")
 
-            time.sleep(random.uniform(8.0, 15.0))  # Longer delays
+            logger.debug(
+                f"r/{sub_name}: {sub_used} requests, {sub_opps} raw opps"
+            )
+            time.sleep(random.uniform(3.0, 6.0))  # inter-sub pause (was 8–15s)
 
         opportunities.sort(
             key=lambda x: x["relevance_score"], reverse=True
         )
+
+        # Dottie (or any project with opportunity_discovery.enabled):
+        # keyword net → LLM meetup filter
+        try:
+            from core.dottie_discovery import (
+                discovery_enabled,
+                filter_opportunities,
+                persist_discovery_results,
+            )
+            if discovery_enabled(project) and opportunities:
+                llm = getattr(self.content_gen, "llm", None)
+                if llm is not None:
+                    keepers = filter_opportunities(llm, opportunities, project)
+                    persist_discovery_results(
+                        self.db, opportunities, keepers, project_name
+                    )
+                    opportunities = keepers
+                else:
+                    logger.warning("Dottie discovery skipped — no LLM on content_gen")
+        except Exception as e:
+            logger.error(f"Dottie discovery filter failed: {e}")
+
+        # Diversity hint in log
+        by_sub: Dict[str, int] = {}
+        for o in opportunities:
+            s = o.get("subreddit", "?")
+            by_sub[s] = by_sub.get(s, 0) + 1
+
         logger.info(
             f"Reddit scan for {project_name}: "
             f"found {len(opportunities)} opportunities "
-            f"({request_count} requests)"
+            f"({request_count} requests) by_sub={by_sub}"
         )
         return opportunities
 
@@ -923,6 +1024,203 @@ class RedditWebBot(BasePlatform):
                 error_message=str(e),
             )
             return False
+
+    def post_comment_text(
+        self,
+        opportunity: Dict,
+        comment_text: str,
+        project_name: str = "",
+        update_opportunity_status: bool = False,
+    ) -> Dict:
+        """Post an already-written comment (HITL approve path).
+
+        Returns dict: {ok, comment_id, error}. Does not generate LLM text.
+        Does not update opportunity status unless update_opportunity_status=True
+        (HITL marks opportunities 'approved' separately).
+        """
+        comment_text = (comment_text or "").strip()
+        if not comment_text:
+            return {"ok": False, "comment_id": None, "error": "Empty comment text"}
+
+        subreddit = (
+            opportunity.get("subreddit")
+            or opportunity.get("subreddit_or_query")
+            or ""
+        )
+        target_id = opportunity.get("target_id", "")
+        if not target_id:
+            return {"ok": False, "comment_id": None, "error": "Missing target_id"}
+
+        if time.time() < self._ratelimit_until:
+            remaining = int((self._ratelimit_until - time.time()) / 60)
+            return {
+                "ok": False,
+                "comment_id": None,
+                "error": f"Rate-limited for {remaining}min more",
+            }
+
+        if self._consecutive_failures >= self._max_failures:
+            if self._circuit_breaker_opened_at is None:
+                self._circuit_breaker_opened_at = time.time()
+            elapsed = time.time() - self._circuit_breaker_opened_at
+            if elapsed < 1800:
+                return {
+                    "ok": False,
+                    "comment_id": None,
+                    "error": f"Circuit breaker open ({self._consecutive_failures} failures)",
+                }
+            self._consecutive_failures = 0
+            self._circuit_breaker_opened_at = None
+
+        if not self._ensure_auth():
+            self._consecutive_failures += 1
+            return {"ok": False, "comment_id": None, "error": "Reddit authentication failed"}
+
+        if not self._modhash:
+            self._consecutive_failures += 1
+            return {"ok": False, "comment_id": None, "error": "No modhash (CSRF) available"}
+
+        try:
+            fullname = opportunity.get("fullname", "") or f"t3_{target_id}"
+            post_data = {
+                "thing_id": fullname,
+                "text": comment_text,
+                "uh": self._modhash,
+                "api_type": "json",
+            }
+            post_headers = {
+                "User-Agent": self.session.headers.get("User-Agent", _random_ua()),
+                "Referer": opportunity.get("url", f"{REDDIT_OLD}/"),
+                "Origin": REDDIT_OLD,
+            }
+            resp = self.session.post(
+                f"{REDDIT_OLD}/api/comment",
+                data=post_data,
+                headers=post_headers,
+                timeout=30,
+            )
+            if resp.status_code == 429:
+                self._consecutive_failures += 1
+                return {"ok": False, "comment_id": None, "error": "Reddit rate limited (429)"}
+            if resp.status_code == 403:
+                if subreddit:
+                    self.db.ban_account_from_sub(self._username, subreddit)
+                self._authenticated = False
+                self._modhash = ""
+                self._consecutive_failures += 1
+                return {"ok": False, "comment_id": None, "error": "Reddit 403 forbidden"}
+
+            try:
+                result = resp.json()
+            except (ValueError, Exception):
+                self._consecutive_failures += 1
+                self.db.log_action(
+                    platform="reddit",
+                    action_type="comment",
+                    account=self._username,
+                    project=project_name or "unknown",
+                    target_id=target_id,
+                    content=comment_text,
+                    success=False,
+                    error_message="non-JSON response (auto-removed)",
+                    metadata={"method": "hitl_web", "subreddit": subreddit},
+                )
+                return {"ok": False, "comment_id": None, "error": "Non-JSON response"}
+
+            errors = result.get("json", {}).get("errors", [])
+            if errors:
+                error_msg = str(errors)
+                is_ratelimit = any(
+                    e[0] == "RATELIMIT" for e in errors if isinstance(e, list) and e
+                )
+                if is_ratelimit:
+                    wait_minutes = self._parse_ratelimit_wait(error_msg)
+                    self._ratelimit_until = time.time() + wait_minutes * 60
+                    if subreddit:
+                        self.db.log_captcha_hit(subreddit, self._username)
+                    self.db.log_action(
+                        platform="reddit",
+                        action_type="comment",
+                        account=self._username,
+                        project=project_name or "unknown",
+                        target_id=target_id,
+                        content=comment_text,
+                        success=False,
+                        error_message=f"RATELIMIT:{wait_minutes}min",
+                        metadata={"method": "hitl_web", "subreddit": subreddit},
+                    )
+                    return {
+                        "ok": False,
+                        "comment_id": None,
+                        "error": f"RATELIMIT:{wait_minutes}min",
+                    }
+                self._consecutive_failures += 1
+                self.db.log_action(
+                    platform="reddit",
+                    action_type="comment",
+                    account=self._username,
+                    project=project_name or "unknown",
+                    target_id=target_id,
+                    content=comment_text,
+                    success=False,
+                    error_message=error_msg,
+                    metadata={"method": "hitl_web", "subreddit": subreddit},
+                )
+                return {"ok": False, "comment_id": None, "error": error_msg}
+
+            self._consecutive_failures = 0
+            self._circuit_breaker_opened_at = None
+            things = result.get("json", {}).get("data", {}).get("things", [])
+            comment_data = things[0].get("data", {}) if things else {}
+            comment_id = comment_data.get("id", "unknown")
+
+            try:
+                self.db.log_comment_content(
+                    account=self._username,
+                    subreddit=subreddit,
+                    post_id=target_id,
+                    comment_text=comment_text,
+                )
+            except Exception:
+                pass
+
+            self.db.log_action(
+                platform="reddit",
+                action_type="comment",
+                account=self._username,
+                project=project_name or "unknown",
+                target_id=target_id,
+                content=comment_text,
+                metadata={
+                    "comment_id": comment_id,
+                    "promotional": False,
+                    "subreddit": subreddit,
+                    "method": "hitl_web",
+                },
+            )
+            if update_opportunity_status:
+                self.db.update_opportunity_status(target_id, "acted")
+
+            logger.info(
+                f"HITL posted comment on r/{subreddit}: {target_id} ({comment_id})"
+            )
+            return {"ok": True, "comment_id": comment_id, "error": None}
+
+        except Exception as e:
+            logger.error(f"HITL comment failed: {e}")
+            self._consecutive_failures += 1
+            self.db.log_action(
+                platform="reddit",
+                action_type="comment",
+                account=self._username,
+                project=project_name or "unknown",
+                target_id=target_id,
+                content=comment_text,
+                success=False,
+                error_message=str(e),
+                metadata={"method": "hitl_web", "subreddit": subreddit},
+            )
+            return {"ok": False, "comment_id": None, "error": str(e)}
 
     def _validate_content(
         self,
@@ -2442,7 +2740,38 @@ class RedditWebBot(BasePlatform):
     # ── Connection & Cleanup ──────────────────────────────────────────
 
     def test_connection(self) -> bool:
-        """Test Reddit connectivity."""
+        """Test Reddit connectivity using session cookies when available.
+
+        Reddit now returns 403 HTML for anonymous .json reads from many IPs.
+        Cookie-authenticated requests still work — prefer those.
+        """
+        # Prefer authenticated "who am I" check when cookies exist
+        if self._username and not self._username.startswith("YOUR_"):
+            if self._ensure_auth():
+                logger.info(f"Reddit authenticated as: u/{self._username}")
+                # Authenticated listing read (same path scans use)
+                try:
+                    resp = self.session.get(
+                        f"{REDDIT_BASE}/r/python/hot.json?limit=1",
+                        headers={"Accept": "application/json"},
+                        timeout=10,
+                    )
+                    if resp.status_code == 200 and "json" in resp.headers.get("Content-Type", ""):
+                        logger.info("Reddit authenticated read: OK")
+                        return True
+                    logger.warning(
+                        f"Auth OK but listing read returned {resp.status_code}"
+                    )
+                except Exception as e:
+                    logger.warning(f"Authenticated read check failed: {e}")
+                return True  # login works; listing flake shouldn't fail the test
+            logger.error(
+                "Reddit cookies missing or expired. "
+                "Run: python miloagent.py login reddit"
+            )
+            return False
+
+        # No account configured — last-resort anonymous probe (often 403 now)
         try:
             resp = requests.get(
                 f"{REDDIT_BASE}/r/python/hot.json?limit=1",
@@ -2450,25 +2779,16 @@ class RedditWebBot(BasePlatform):
                 timeout=10,
             )
             if resp.status_code != 200:
-                logger.error(f"Reddit anonymous read failed: {resp.status_code}")
+                logger.error(
+                    f"Reddit anonymous read failed: {resp.status_code}. "
+                    "Configure MILO_REDDIT_USERNAME and run login reddit."
+                )
                 return False
             logger.info("Reddit anonymous read: OK")
+            return True
         except Exception as e:
             logger.error(f"Reddit connection failed: {e}")
             return False
-
-        if self._username and not self._username.startswith("YOUR_"):
-            if self._ensure_auth():
-                logger.info(f"Reddit authenticated as: u/{self._username}")
-            else:
-                logger.warning(
-                    "Reddit read works, but login failed. "
-                    "Scanning will work, but posting won't.\n"
-                    "  To authenticate, run:\n"
-                    "    python miloagent.py login reddit\n"
-                    "    python miloagent.py paste-cookies reddit"
-                )
-        return True
 
     def close(self):
         """Close the requests session to free resources."""

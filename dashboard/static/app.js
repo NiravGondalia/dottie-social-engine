@@ -792,18 +792,387 @@ function renderInsights(d) {
 }
 
 // ══════════════════════════════════════════════════════════════
-// RENDER: OPPORTUNITIES
+// RENDER: OPPORTUNITIES (HITL)
 // ══════════════════════════════════════════════════════════════
+const _hitlExpanded = new Set(); // target_id strings kept open across refresh
+const _hitlDrafts = {};          // target_id -> {title, desc, reply, post}
+let _hitlFingerprint = '';
+
+function _hitlOppsFingerprint(list) {
+  return list.map(o => [
+    o.target_id || '',
+    o.score || o.final_score || o.relevance_score || 0,
+    o.dottie_score != null ? o.dottie_score : '',
+    o.meetup_title || '',
+    o.meetup_description || '',
+    o.reply_draft || '',
+    o.why || '',
+  ].join('\t')).join('\n');
+}
+
+function _hitlCaptureDrafts() {
+  document.querySelectorAll('#oppsList .hitl-card[data-tid]').forEach(card => {
+    const tid = card.getAttribute('data-tid');
+    if (!tid) return;
+    const title = card.querySelector('[data-hitl="title"]');
+    const desc = card.querySelector('[data-hitl="desc"]');
+    const reply = card.querySelector('[data-hitl="reply"]');
+    const post = card.querySelector('[data-hitl="post"]');
+    if (!title && !desc && !reply) return;
+    _hitlDrafts[tid] = {
+      title: title ? title.value : '',
+      desc: desc ? desc.value : '',
+      reply: reply ? reply.value : '',
+      post: !!(post && post.checked),
+    };
+  });
+}
+
+function _hitlApplyOpenState() {
+  document.querySelectorAll('#oppsList .hitl-card[data-tid]').forEach(card => {
+    const tid = card.getAttribute('data-tid');
+    const body = card.querySelector('.hitl-body');
+    const chev = card.querySelector('.hitl-chevron');
+    if (!body) return;
+    const open = _hitlExpanded.has(tid);
+    body.style.display = open ? 'block' : 'none';
+    if (chev) chev.innerHTML = open ? '&#9650;' : '&#9660;';
+    const draft = _hitlDrafts[tid];
+    if (!draft) return;
+    const title = card.querySelector('[data-hitl="title"]');
+    const desc = card.querySelector('[data-hitl="desc"]');
+    const reply = card.querySelector('[data-hitl="reply"]');
+    const post = card.querySelector('[data-hitl="post"]');
+    if (title) title.value = draft.title;
+    if (desc) desc.value = draft.desc;
+    if (reply) reply.value = draft.reply;
+    if (post) post.checked = !!draft.post;
+  });
+}
+
 function renderOpps(d) {
   const el = document.getElementById('oppsList');
   if (!el) return;
-  if (!d||d.error) { el.innerHTML=`<p class="no-data">${d&&d.error?esc(d.error):'No pending opportunities'}</p>`; return; }
-  if (!d.length) { el.innerHTML='<p class="no-data">No pending opportunities</p>'; return; }
-  el.innerHTML = d.slice(0,25).map(o => {
-    const sc = o.score||o.relevance_score||0;
+  if (!d||d.error) {
+    _hitlFingerprint = '';
+    el.innerHTML=`<p class="no-data">${d&&d.error?esc(d.error):'No pending opportunities'}</p>`;
+    return;
+  }
+  if (!d.length) {
+    _hitlFingerprint = '';
+    _hitlExpanded.clear();
+    el.innerHTML='<p class="no-data">No pending opportunities</p>';
+    return;
+  }
+  const list = d.slice(0,25);
+  const fp = _hitlOppsFingerprint(list);
+  // Same data: leave DOM alone so open cards / in-progress edits stay put
+  if (fp === _hitlFingerprint && el.querySelector('.hitl-card')) return;
+  _hitlCaptureDrafts();
+  _hitlFingerprint = fp;
+  const liveIds = new Set(list.map(o => o.target_id || '').filter(Boolean));
+  for (const tid of [..._hitlExpanded]) {
+    if (!liveIds.has(tid)) _hitlExpanded.delete(tid);
+  }
+  for (const tid of Object.keys(_hitlDrafts)) {
+    if (!liveIds.has(tid)) delete _hitlDrafts[tid];
+  }
+  el.innerHTML = list.map((o, idx) => {
+    const sc = o.score||o.final_score||o.relevance_score||0;
     const c = sc>=7?'var(--green)':sc>=4?'var(--yellow)':'var(--text3)';
-    return `<div class="feed-item"><span style="color:${c};font-family:var(--font-data);font-weight:700;min-width:32px;font-size:13px">${sc.toFixed(1)}</span><span class="type" style="color:var(--orange)">${esc(o.platform||'')}</span><span class="msg">${esc(o.subreddit_or_query||o.subreddit||'')} — ${esc((o.title||o.content||'').substring(0,80))}</span></div>`;
+    const sub = o.subreddit||o.subreddit_or_query||'';
+    const tid = o.target_id||'';
+    const meetup = o.meetup_title || '';
+    const dottie = o.dottie_score != null ? o.dottie_score : null;
+    const why = o.why || '';
+    const title = (meetup || o.title || o.content || '').substring(0,80);
+    const href = o.url || ((o.platform==='reddit' && tid)
+      ? (sub
+          ? `https://www.reddit.com/r/${encodeURIComponent(sub)}/comments/${encodeURIComponent(tid)}/`
+          : `https://redd.it/${encodeURIComponent(tid)}`)
+      : '');
+    const badge = dottie != null
+      ? `<span style="color:var(--accent);font-size:11px;margin-left:6px">Dottie ${esc(String(dottie))}/12</span>`
+      : '';
+    const titleHtml = href
+      ? `<a href="${href}" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="color:inherit;text-decoration:underline;text-underline-offset:2px">${esc(sub)} — ${esc(title)} &#8599;</a>${badge}`
+      : `${esc(sub)} — ${esc(title)}${badge}`;
+    const whyHtml = why
+      ? `<div class="hitl-why" onclick="toggleHitlCard('${esc(tid).replace(/'/g, '&#39;')}')">${esc(String(why).substring(0,200))}</div>`
+      : '';
+    const mt = o.meetup_title || '';
+    const md = o.meetup_description || '';
+    const reply = o.reply_draft || '';
+    const safeId = encodeURIComponent(tid);
+    const attr = (s) => esc(s).replace(/"/g,'&quot;');
+    const tidAttr = esc(tid).replace(/'/g, '&#39;');
+    return `<div class="hitl-card" data-tid="${esc(tid)}">
+      <div class="hitl-head" onclick="toggleHitlCard('${tidAttr}')">
+        <span style="color:${c};font-family:var(--font-data);font-weight:700;min-width:32px;font-size:13px">${Number(sc).toFixed(1)}</span>
+        <span class="type" style="color:var(--orange)">${esc(o.platform||'')}</span>
+        <span class="msg" style="flex:1">${titleHtml}</span>
+        <span class="hitl-chevron">&#9660;</span>
+      </div>
+      ${whyHtml}
+      <div class="hitl-body" style="display:none">
+        <label class="hitl-label">Meetup title</label>
+        <input class="form-input hitl-input" data-hitl="title" value="${attr(mt)}" />
+        <label class="hitl-label">Meetup description</label>
+        <textarea class="form-input hitl-input" data-hitl="desc" rows="2">${esc(md)}</textarea>
+        <label class="hitl-label">Reply text</label>
+        <textarea class="form-input hitl-input" data-hitl="reply" rows="3">${esc(reply)}</textarea>
+        <label class="hitl-check"><input type="checkbox" data-hitl="post" /> Also post to Reddit</label>
+        <div class="hitl-actions">
+          <button class="btn btn-sm danger" onclick="skipOpportunity('${safeId}')">Skip</button>
+          <button class="btn btn-sm" onclick="copyHitlReply('${tidAttr}')">Copy reply</button>
+          <button class="btn btn-sm" style="background:var(--green);color:#000" onclick="approveOpportunity('${safeId}')">Approve</button>
+        </div>
+      </div>
+    </div>`;
   }).join('');
+  _hitlApplyOpenState();
+}
+
+function toggleHitlCard(tid) {
+  if (!tid) return;
+  const card = document.querySelector('#oppsList .hitl-card[data-tid="'+CSS.escape(tid)+'"]');
+  if (!card) return;
+  const body = card.querySelector('.hitl-body');
+  const chev = card.querySelector('.hitl-chevron');
+  if (!body) return;
+  const open = body.style.display !== 'none';
+  if (open) _hitlExpanded.delete(tid);
+  else _hitlExpanded.add(tid);
+  body.style.display = open ? 'none' : 'block';
+  if (chev) chev.innerHTML = open ? '&#9660;' : '&#9650;';
+  _hitlCaptureDrafts();
+}
+
+function _hitlCardFields(tid) {
+  const card = document.querySelector('#oppsList .hitl-card[data-tid="'+CSS.escape(tid)+'"]');
+  if (!card) return { reply: '', meetup_title: '', meetup_description: '', post_to_reddit: false };
+  return {
+    reply: (card.querySelector('[data-hitl="reply"]') || {}).value || '',
+    meetup_title: (card.querySelector('[data-hitl="title"]') || {}).value || '',
+    meetup_description: (card.querySelector('[data-hitl="desc"]') || {}).value || '',
+    post_to_reddit: !!(card.querySelector('[data-hitl="post"]') || {}).checked,
+  };
+}
+
+async function copyHitlReply(tid) {
+  const fields = _hitlCardFields(tid);
+  const text = fields.reply || '';
+  try {
+    await navigator.clipboard.writeText(text);
+    toast('Reply copied','success');
+  } catch(e) {
+    const ta = document.querySelector('#oppsList .hitl-card[data-tid="'+CSS.escape(tid)+'"] [data-hitl="reply"]');
+    if (ta) { ta.select(); document.execCommand('copy'); }
+    toast('Reply copied','success');
+  }
+}
+
+async function skipOpportunity(encodedTid) {
+  const tid = decodeURIComponent(encodedTid);
+  try {
+    const d = await apiPost('/api/opportunities/'+encodeURIComponent(tid)+'/skip', {reason:'human skip'});
+    if (!d||!d.ok) { toast((d&&d.error)||'Skip failed','error'); return; }
+    _hitlExpanded.delete(tid);
+    delete _hitlDrafts[tid];
+    _hitlFingerprint = ''; // force re-render
+    toast('Skipped','success');
+    refresh();
+  } catch(e) { toast(e.message,'error'); }
+}
+
+async function approveOpportunity(encodedTid) {
+  const tid = decodeURIComponent(encodedTid);
+  const fields = _hitlCardFields(tid);
+  try {
+    const d = await apiPost('/api/opportunities/'+encodeURIComponent(tid)+'/approve', {
+      reply_text: fields.reply,
+      meetup_title: fields.meetup_title,
+      meetup_description: fields.meetup_description,
+      post_to_reddit: fields.post_to_reddit,
+    });
+    if (!d||!d.ok) { toast((d&&d.error)||'Approve failed','error'); return; }
+    _hitlExpanded.delete(tid);
+    delete _hitlDrafts[tid];
+    _hitlFingerprint = '';
+    if (fields.post_to_reddit) {
+      const r = d.reddit||{};
+      if (r.ok) toast('Approved + Reddit posted','success');
+      else toast('Approved (activity saved). Reddit: '+(r.error||'failed'),'warning');
+    } else {
+      toast('Approved → Dottie queue','success');
+    }
+    refresh();
+  } catch(e) { toast(e.message,'error'); }
+}
+
+const _dottieExpanded = new Set(); // activity id strings
+let _dottieFingerprint = '';
+const _dottieById = {};
+
+function _dottieFingerprint(list) {
+  return list.map(a => [
+    a.id || '',
+    a.status || '',
+    a.meetup_title || '',
+    a.reddit_posted ? '1' : '0',
+    a.reddit_url || '',
+  ].join('\t')).join('\n');
+}
+
+function renderDottieQueue(d) {
+  const el = document.getElementById('dottieQueue');
+  if (!el) return;
+  if (!d||d.error) {
+    _dottieFingerprint = '';
+    el.innerHTML=`<p class="no-data">${d&&d.error?esc(d.error):'No activities'}</p>`;
+    return;
+  }
+  if (!d.length) {
+    _dottieFingerprint = '';
+    _dottieExpanded.clear();
+    el.innerHTML='<p class="no-data">No queued activities yet — approve an opportunity</p>';
+    return;
+  }
+  _dottieCaptureReplies();
+  const localReplies = {};
+  Object.keys(_dottieById).forEach(id => {
+    if (_dottieById[id] && _dottieById[id].reply_text != null) {
+      localReplies[id] = _dottieById[id].reply_text;
+    }
+  });
+  const list = d.slice(0,40).map(a => {
+    const id = String(a.id || '');
+    if (localReplies[id] !== undefined) return Object.assign({}, a, { reply_text: localReplies[id] });
+    return a;
+  });
+  const fp = _dottieFingerprint(d.slice(0,40));
+  if (fp === _dottieFingerprint && el.querySelector('.dottie-card')) return;
+  _dottieFingerprint = fp;
+  Object.keys(_dottieById).forEach(k => delete _dottieById[k]);
+  const liveIds = new Set();
+  el.innerHTML = list.map(a => {
+    const id = String(a.id || '');
+    liveIds.add(id);
+    _dottieById[id] = a;
+    const st = a.status||'queued';
+    const posted = a.reddit_posted ? ' · Reddit posted' : '';
+    const title = a.meetup_title || a.source_title || a.opportunity_target_id || '';
+    const sub = a.subreddit ? 'r/'+a.subreddit : '';
+    const reply = a.reply_text || '';
+    const desc = a.meetup_description || '';
+    const why = a.why || '';
+    const url = a.reddit_url || '';
+    const open = _dottieExpanded.has(id);
+    const preview = reply ? esc(reply.substring(0,140))+(reply.length>140?'…':'') : '';
+    const urlHtml = url
+      ? `<a href="${esc(url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="color:inherit;text-decoration:underline;text-underline-offset:2px">${esc(sub||'Reddit')} &#8599;</a>`
+      : esc(sub);
+    return `<div class="hitl-card dottie-card" data-aid="${esc(id)}">
+      <div class="hitl-head" onclick="toggleDottieCard('${esc(id)}')">
+        <span class="type" style="color:var(--accent)">${esc(st)}</span>
+        <span class="msg" style="flex:1"><strong>${esc(title)}</strong> ${urlHtml}${posted}</span>
+        <span class="hitl-chevron">${open ? '&#9650;' : '&#9660;'}</span>
+      </div>
+      ${why ? `<div class="hitl-why" onclick="toggleDottieCard('${esc(id)}')">${esc(String(why).substring(0,200))}</div>` : ''}
+      ${(!open && preview) ? `<div class="hitl-why" style="padding-top:0;opacity:.85" onclick="toggleDottieCard('${esc(id)}')">${preview}</div>` : ''}
+      <div class="hitl-body" style="display:${open ? 'block' : 'none'}">
+        <label class="hitl-label">Meetup title</label>
+        <div class="dottie-field">${esc(title)||'—'}</div>
+        <label class="hitl-label">Meetup description</label>
+        <div class="dottie-field">${esc(desc)||'—'}</div>
+        <label class="hitl-label">Reply text</label>
+        <textarea class="form-input hitl-input" data-dottie-reply="${esc(id)}" rows="4">${esc(reply)}</textarea>
+        <div class="hitl-actions">
+          <button class="btn btn-sm" onclick="copyDottieReply('${esc(id)}')">Copy reply</button>
+          <button class="btn btn-sm" onclick="copyDottieAll('${esc(id)}')">Copy all</button>
+          ${url ? `<a class="btn btn-sm" href="${esc(url)}" target="_blank" rel="noopener">Open Reddit</a>` : ''}
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+  for (const id of [..._dottieExpanded]) {
+    if (!liveIds.has(id)) _dottieExpanded.delete(id);
+  }
+}
+
+async function _copyText(text, okMsg) {
+  try {
+    await navigator.clipboard.writeText(text||'');
+    toast(okMsg||'Copied','success');
+  } catch(e) {
+    const ta = document.createElement('textarea');
+    ta.value = text||'';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    ta.remove();
+    toast(okMsg||'Copied','success');
+  }
+}
+
+async function copyDottieReply(id) {
+  const a = _dottieById[id] || {};
+  const ta = document.querySelector('#dottieQueue textarea[data-dottie-reply="'+CSS.escape(id)+'"]');
+  const text = (ta && ta.value) || a.reply_text || '';
+  if (ta && _dottieById[id]) _dottieById[id].reply_text = ta.value;
+  await _copyText(text, 'Reply copied');
+}
+
+async function copyDottieAll(id) {
+  const a = _dottieById[id] || {};
+  const ta = document.querySelector('#dottieQueue textarea[data-dottie-reply="'+CSS.escape(id)+'"]');
+  const reply = (ta && ta.value) || a.reply_text || '';
+  if (ta && _dottieById[id]) _dottieById[id].reply_text = ta.value;
+  const parts = [
+    a.meetup_title ? 'Title: '+a.meetup_title : '',
+    a.meetup_description ? 'Description: '+a.meetup_description : '',
+    a.subreddit ? 'Subreddit: r/'+a.subreddit : '',
+    a.reddit_url ? 'URL: '+a.reddit_url : '',
+    reply ? 'Reply:\n'+reply : '',
+  ].filter(Boolean);
+  await _copyText(parts.join('\n\n'), 'Activity copied');
+}
+
+function _dottieCaptureReplies() {
+  document.querySelectorAll('#dottieQueue textarea[data-dottie-reply]').forEach(ta => {
+    const id = ta.getAttribute('data-dottie-reply');
+    if (id && _dottieById[id]) _dottieById[id].reply_text = ta.value;
+  });
+}
+
+function toggleDottieCard(id) {
+  if (!id) return;
+  _dottieCaptureReplies();
+  if (_dottieExpanded.has(id)) _dottieExpanded.delete(id);
+  else _dottieExpanded.add(id);
+  _dottieFingerprint = '';
+  renderDottieQueue(Object.values(_dottieById).sort((a,b)=>(b.id||0)-(a.id||0)));
+}
+
+async function exportDottieActivities() {
+  try {
+    const r = await fetch('/api/dottie/activities/export', {headers:{'Authorization':'Bearer '+TOKEN}});
+    if (r.status===401) { logout(); return; }
+    const data = await r.json();
+    if (data&&data.error) { toast(data.error,'error'); return; }
+    const blob = new Blob([JSON.stringify(data,null,2)], {type:'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'dottie_activities_'+new Date().toISOString().slice(0,19).replace(/[:T]/g,'')+'.json';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    toast('Exported '+(Array.isArray(data)?data.length:0)+' activities','success');
+    _dottieFingerprint = '';
+    refresh();
+  } catch(e) { toast(e.message,'error'); }
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1887,20 +2256,22 @@ async function refresh() {
       if (convos.status==='fulfilled') renderConversations(convos.value);
     }
     else if (currentTab === 'intel') {
-      const [brain, perf, insights, opps, decisions, trends, knowledge, discoveries, failures, sentiment] = await Promise.allSettled([
+      const [brain, perf, insights, opps, decisions, trends, knowledge, discoveries, failures, sentiment, dottieActs] = await Promise.allSettled([
         api('/api/brain'), api('/api/performance'), api('/api/insights'), api('/api/opportunities?limit=25'),
         api('/api/decisions?hours=4&limit=40').catch(()=>[]),
         api('/api/intel/trends').catch(()=>({trends:[]})),
         api('/api/intel/knowledge').catch(()=>({entries:[]})),
         api('/api/intel/discoveries').catch(()=>({discoveries:[]})),
         api('/api/intel/failures').catch(()=>({failures:[]})),
-        api('/api/intel/sentiment').catch(()=>({by_subreddit:[],by_tone:[]}))
+        api('/api/intel/sentiment').catch(()=>({by_subreddit:[],by_tone:[]})),
+        api('/api/dottie/activities?limit=40').catch(()=>[])
       ]);
       if (brain.status==='fulfilled') renderBrain(brain.value);
       if (perf.status==='fulfilled') renderPerformance(perf.value);
       if (insights.status==='fulfilled') renderInsights(insights.value);
       if (opps.status==='fulfilled') renderOpps(opps.value);
       if (decisions.status==='fulfilled') renderDecisionLog(decisions.value);
+      if (dottieActs.status==='fulfilled') renderDottieQueue(dottieActs.value);
       if (trends.status==='fulfilled') renderTrendingFeed(trends.value);
       if (knowledge.status==='fulfilled') renderKnowledgeBase(knowledge.value);
       if (discoveries.status==='fulfilled') renderDiscoveriesList(discoveries.value);

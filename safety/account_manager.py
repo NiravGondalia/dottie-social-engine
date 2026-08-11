@@ -173,32 +173,37 @@ class AccountManager:
         """Load accounts for a platform from config.
 
         Prefers .local.yaml override (gitignored) so git pull never
-        overwrites real credentials on the server.
+        overwrites non-secret settings. Passwords/API secrets come from env.
         """
+        from core.secrets import hydrate_config
+
         if platform == "reddit":
-            path = f"{self.config_dir}/reddit_accounts.yaml"
+            logical = f"{self.config_dir}/reddit_accounts.yaml"
         elif platform == "twitter":
-            path = f"{self.config_dir}/twitter_accounts.yaml"
+            logical = f"{self.config_dir}/twitter_accounts.yaml"
         elif platform == "telegram":
-            path = f"{self.config_dir}/telegram_user_accounts.yaml"
+            logical = f"{self.config_dir}/telegram_user_accounts.yaml"
         else:
             return []
 
-        # Check for .local.yaml override
-        if path.endswith(".yaml"):
-            local_path = path[:-5] + ".local.yaml"
+        path = logical
+        if logical.endswith(".yaml"):
+            local_path = logical[:-5] + ".local.yaml"
             if os.path.exists(local_path):
                 path = local_path
 
         try:
             with open(path) as f:
                 data = yaml.safe_load(f) or {}
+            data = hydrate_config(logical, data)
             accounts = data.get("accounts", [])
             result = []
             for a in accounts:
                 if not a.get("enabled", True):
                     continue
                 identifier = a.get("username") or a.get("phone", "")
+                if not identifier:
+                    continue
                 if identifier.startswith("YOUR_") or identifier.startswith("your_"):
                     continue
                 # Skip obvious placeholder accounts
@@ -556,13 +561,14 @@ class AccountManager:
             if acc.get("username", "").lower() == username.lower():
                 return f"Account @{username} already exists on {platform}"
 
-        # Build account entry — cookie file uses username (matches paste endpoint)
+        # Build account entry — secrets live in .env, not YAML
         cookie_file = f"data/cookies/{platform}_{username}.json"
+        slot = len(accounts) + 1
 
         if platform == "reddit":
             new_account = {
-                "username": username,
-                "password": password,
+                "username": username,  # display/default; override with MILO_REDDIT_N_USERNAME
+                "password": "",
                 "email": email,
                 "client_id": "",
                 "client_secret": "",
@@ -577,11 +583,15 @@ class AccountManager:
                 "cooldown_minutes": 15,
                 "max_actions_per_hour": 4,
             }
+            secret_hint = (
+                f"Set in .env: MILO_REDDIT_{slot}_USERNAME={username} "
+                f"MILO_REDDIT_{slot}_PASSWORD=..."
+            )
         else:  # twitter
             new_account = {
                 "username": username,
-                "email": email,
-                "password": password,
+                "email": "",
+                "password": "",
                 "totp_secret": "",
                 "cookies_file": cookie_file,
                 "enabled": True,
@@ -590,6 +600,10 @@ class AccountManager:
                 "cooldown_minutes": 20,
                 "max_actions_per_hour": 3,
             }
+            secret_hint = (
+                f"Set in .env: MILO_TWITTER_{slot}_USERNAME={username} "
+                f"MILO_TWITTER_{slot}_PASSWORD=... MILO_TWITTER_{slot}_EMAIL=..."
+            )
 
         accounts.append(new_account)
         data["accounts"] = accounts
@@ -603,12 +617,15 @@ class AccountManager:
         # Ensure cookies directory exists
         os.makedirs("data/cookies", exist_ok=True)
 
-        # Write back
+        # Write back (no secrets)
         with open(path, "w") as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
-        logger.info(f"Added {platform} account: @{username}")
-        return f"Added @{username} to {platform}. Cookie file: {cookie_file}"
+        logger.info(f"Added {platform} account slot {slot}: @{username}")
+        return (
+            f"Added @{username} to {platform} (slot {slot}). "
+            f"Cookie file: {cookie_file}. {secret_hint}"
+        )
 
     def remove_account(self, platform: str, username: str) -> str:
         """Disable an account in the config (sets enabled: false)."""
@@ -649,6 +666,8 @@ class AccountManager:
 
     def list_all_accounts(self) -> List[Dict]:
         """List all accounts across platforms (including disabled ones)."""
+        from core.secrets import hydrate_config
+
         results = []
         platform_paths = {
             "reddit": f"{self.config_dir}/reddit_accounts.yaml",
@@ -656,12 +675,20 @@ class AccountManager:
             "telegram": f"{self.config_dir}/telegram_user_accounts.yaml",
         }
 
-        for platform, path in platform_paths.items():
+        for platform, logical in platform_paths.items():
             try:
+                path = logical
+                if logical.endswith(".yaml"):
+                    local_path = logical[:-5] + ".local.yaml"
+                    if os.path.exists(local_path):
+                        path = local_path
                 with open(path) as f:
                     data = yaml.safe_load(f) or {}
+                data = hydrate_config(logical, data)
                 for acc in data.get("accounts", []):
                     username = acc.get("username") or acc.get("phone", "?")
+                    if not username or username in ("?", ""):
+                        continue
                     session_or_cookies = (
                         acc.get("session_file", "")
                         or acc.get("cookies_file", "")

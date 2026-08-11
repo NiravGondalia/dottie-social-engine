@@ -1,18 +1,22 @@
 # =============================================================================
-# Twitter/X Account Configuration
+# Twitter/X Account Configuration (non-secret settings only)
 # =============================================================================
-# Uses cookie-based auth via Twikit library.
-# Note: Twitter may block server IPs (code 226). Use a proxy if needed.
+# Credentials from .env:
+#   MILO_TWITTER_1_USERNAME=...
+#   MILO_TWITTER_1_PASSWORD=...
+#   MILO_TWITTER_1_EMAIL=...
+#   MILO_TWITTER_1_TOTP_SECRET=...   # optional
+# Shorthand: MILO_TWITTER_USERNAME / PASSWORD / EMAIL
 # =============================================================================
 
 accounts:
-  - username: "your_twitter_username"
-    email: "your_email@example.com"
-    password: "your_twitter_password"
+  - username: ""
+    email: ""
+    password: ""
     totp_secret: ""
     cookies_file: "data/cookies/twitter_account1.json"
-    enabled: true
+    enabled: false
     persona: "tech_enthusiast"
-    assigned_projects: ["my_project"]
+    assigned_projects: ["Dottie"]
     cooldown_minutes: 20
     max_actions_per_hour: 3

@@ -31,6 +31,7 @@ GROQ_RPD_LIMIT = 14400      # 14,400 requests per day
 GROQ_TPM_LIMIT = 6000       # ~6k tokens per minute (free tier varies)
 
 
+
 class _RateTracker:
     """Sliding-window rate tracker for Groq free tier."""
 
@@ -151,13 +152,18 @@ class LLMProvider:
 
     def _init_clients(self):
         """Initialize OpenAI client for each enabled provider."""
+        from core.secrets import resolve_llm_api_key
+
         for name, cfg in self.config.get("providers", {}).items():
             if not cfg.get("enabled", False):
                 continue
-            api_key = cfg.get("api_key", "")
-            if api_key.startswith("YOUR_"):
+            # API keys are env-only (never read from llm.yaml)
+            api_key = resolve_llm_api_key(name)
+            if not api_key:
                 logger.warning(
-                    f"LLM provider '{name}' has placeholder API key — skipping"
+                    f"LLM provider '{name}' missing API key — skipping "
+                    f"(set MILO_{name.upper()}_API_KEY in .env; "
+                    f"use MILO_ANTHROPIC_API_KEY for claude)"
                 )
                 continue
             try:

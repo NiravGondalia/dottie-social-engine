@@ -25,16 +25,27 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 try:
-    from passlib.context import CryptContext
-    _pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+    import bcrypt as _bcrypt
 except ImportError:
-    _pwd_ctx = None
+    _bcrypt = None
+
+
+def _hash_password(password: str) -> str:
+    """Hash a password with bcrypt (72-byte input limit handled)."""
+    raw = password.encode("utf-8")[:72]
+    return _bcrypt.hashpw(raw, _bcrypt.gensalt()).decode("ascii")
+
+
+def _verify_password(password: str, password_hash: str) -> bool:
+    """Verify a password against a bcrypt hash."""
+    raw = password.encode("utf-8")[:72]
+    return _bcrypt.checkpw(raw, password_hash.encode("ascii"))
 
 logger = logging.getLogger(__name__)
 
@@ -249,6 +260,75 @@ class ProjectUpdate(BaseModel):
     tone_style: Optional[str] = None
 
 
+class OpportunityApproveRequest(BaseModel):
+    reply_text: str = ""
+    meetup_title: str = ""
+    meetup_description: str = ""
+    post_to_reddit: bool = False
+
+
+class OpportunitySkipRequest(BaseModel):
+    reason: str = "human skip"
+
+
+def _parse_opp_metadata(raw) -> Dict[str, Any]:
+    """Parse opportunity metadata JSON blob into a dict."""
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            data = json.loads(raw)
+            return data if isinstance(data, dict) else {}
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    return {}
+
+
+def _enrich_opportunity(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Flatten opportunity + metadata for HITL UI."""
+    out = dict(row)
+    meta = _parse_opp_metadata(out.get("metadata"))
+    out["metadata"] = meta
+    sub = out.get("subreddit_or_query") or meta.get("subreddit") or ""
+    tid = out.get("target_id") or ""
+    url = meta.get("url") or ""
+    if not url and out.get("platform") == "reddit" and tid:
+        url = (
+            f"https://www.reddit.com/r/{sub}/comments/{tid}/"
+            if sub
+            else f"https://redd.it/{tid}"
+        )
+    out["url"] = url
+    out["subreddit"] = sub
+    out["meetup_title"] = meta.get("meetup_title") or ""
+    out["meetup_description"] = meta.get("meetup_description") or ""
+    out["why"] = meta.get("why") or meta.get("summary") or ""
+    out["category"] = meta.get("category") or ""
+    out["group_size"] = meta.get("group_size") or ""
+    out["urgency"] = meta.get("urgency") or ""
+    out["dottie_score"] = meta.get("dottie_score")
+    out["final_score"] = meta.get("final_score") or out.get("score")
+    out["activity_type"] = meta.get("activity_type") or ""
+    out["reply_draft"] = meta.get("reply_text") or meta.get("reply_draft") or ""
+    return out
+
+
+def _default_reply_draft(
+    meetup_title: str,
+    meetup_description: str,
+    project_url: str = "https://dottie.app",
+) -> str:
+    """Fast template reply — no LLM call for v1."""
+    hang = (meetup_description or meetup_title or "this hangout").strip()
+    if len(hang) > 280:
+        hang = hang[:277] + "..."
+    link = (project_url or "https://dottie.app").rstrip("/")
+    return (
+        f"If anyone's looking for a small-group hang around this — "
+        f"{hang} — Dottie curates intentional in-person groups like this: {link}"
+    )
+
+
 class AccountCreate(BaseModel):
     platform: Literal["reddit", "telegram"]
     username: str = Field(..., min_length=1, max_length=100)
@@ -298,13 +378,13 @@ class WebDashboard:
 
         # Auth: username/password with bcrypt hashing
         self._user = os.environ.get("MILO_WEB_USER", "") or "admin"
-        raw_pass = os.environ.get("MILO_WEB_PASS", "") or self.orch.settings.get("web_dashboard", {}).get("password", "")
+        raw_pass = os.environ.get("MILO_WEB_PASS", "")
         if not raw_pass:
-            raw_pass = os.environ.get("MILO_WEB_TOKEN", "") or self.orch.settings.get("web_dashboard", {}).get("token", "")
+            raw_pass = os.environ.get("MILO_WEB_TOKEN", "")
         if not raw_pass or len(raw_pass) < 6:
             logger.critical(
                 "MILO_WEB_PASS not set or too weak (min 6 chars)! "
-                "Set via MILO_WEB_PASS env var or config/settings.yaml web_dashboard.password"
+                "Set via MILO_WEB_PASS in .env"
             )
             # Generate a random password so dashboard isn't open
             raw_pass = secrets.token_hex(16)
@@ -312,11 +392,11 @@ class WebDashboard:
             logger.critical("Set MILO_WEB_PASS to use a permanent password")
 
         # Hash password at startup (timing-safe comparison on login)
-        if _pwd_ctx:
-            self._pass_hash = _pwd_ctx.hash(raw_pass)
+        if _bcrypt:
+            self._pass_hash = _hash_password(raw_pass)
             self._pass = None  # Don't keep plaintext in memory
         else:
-            logger.warning("passlib not installed — falling back to plaintext password comparison")
+            logger.warning("bcrypt not installed — falling back to plaintext password comparison")
             self._pass_hash = None
             self._pass = raw_pass
 
@@ -416,6 +496,49 @@ class WebDashboard:
             raise HTTPException(status_code=401, detail="Invalid or expired session")
         return True
 
+    def _project_url(self, project_name: str) -> str:
+        """Resolve project URL from loaded projects (fallback dottie.app)."""
+        name = (project_name or "").strip().lower()
+        for p in getattr(self.orch, "projects", []) or []:
+            info = p.get("project") or {}
+            if (info.get("name") or "").strip().lower() == name:
+                return info.get("url") or "https://dottie.app"
+        if name == "dottie" or not name:
+            return "https://dottie.app"
+        return "https://dottie.app"
+
+    def _hitl_post_to_reddit(
+        self, opp: Dict[str, Any], reply_text: str, project_name: str,
+    ) -> Dict[str, Any]:
+        """Post edited HITL reply via Reddit web bot. Allowed while paused."""
+        account = self.orch.account_mgr.get_next_account("reddit", project=project_name)
+        if not account:
+            return {
+                "ok": False,
+                "comment_id": None,
+                "error": "No available Reddit account",
+                "account": "",
+            }
+        bot = self.orch._get_reddit_bot(account)
+        if not hasattr(bot, "post_comment_text"):
+            return {
+                "ok": False,
+                "comment_id": None,
+                "error": "Reddit bot does not support HITL post_comment_text",
+                "account": account.get("username", ""),
+            }
+        payload = dict(opp)
+        if "subreddit" not in payload:
+            payload["subreddit"] = payload.get("subreddit_or_query", "")
+        result = bot.post_comment_text(
+            payload,
+            reply_text,
+            project_name=project_name,
+            update_opportunity_status=False,
+        )
+        result["account"] = account.get("username", "")
+        return result
+
     # ── Static files ─────────────────────────────────────────
 
     def _setup_static(self):
@@ -472,8 +595,8 @@ class WebDashboard:
                 raise HTTPException(status_code=429, detail="Too many login attempts. Try again later.")
             # Verify credentials (timing-safe with bcrypt if available)
             user_ok = body.username == self._user
-            if self._pass_hash and _pwd_ctx:
-                pass_ok = _pwd_ctx.verify(body.password, self._pass_hash)
+            if self._pass_hash and _bcrypt:
+                pass_ok = _verify_password(body.password, self._pass_hash)
             else:
                 pass_ok = body.password == self._pass
             if user_ok and pass_ok:
@@ -747,17 +870,20 @@ class WebDashboard:
         #   4. PRAW uses refresh_token for that account (no cookies, no expiry)
 
         def _load_reddit_api_config() -> dict:
-            """Load client_id/secret from config/reddit_api.local.yaml."""
+            """Load Reddit OAuth app settings; secrets from env only."""
+            from core.secrets import hydrate_reddit_api
             import yaml
             paths = [
                 Path("config/reddit_api.local.yaml"),
                 Path("config/reddit_api.yaml"),
             ]
+            data: dict = {}
             for p in paths:
                 if p.exists():
                     with open(p) as f:
-                        return yaml.safe_load(f) or {}
-            return {}
+                        data = yaml.safe_load(f) or {}
+                    break
+            return hydrate_reddit_api(data)
 
         class OAuthStartModel(BaseModel):
             username: str
@@ -769,7 +895,10 @@ class WebDashboard:
             client_id = cfg.get("client_id", "")
             redirect_uri = cfg.get("redirect_uri", "https://milo.soclose.co/api/reddit/oauth/callback")
             if not client_id:
-                return {"ok": False, "error": "Reddit API not configured (config/reddit_api.local.yaml missing client_id)"}
+                return {
+                    "ok": False,
+                    "error": "Reddit API not configured — set MILO_REDDIT_API_CLIENT_ID in .env",
+                }
 
             scopes = "identity,submit,comment,vote,subscribe,read,flair"
             import urllib.parse
@@ -984,7 +1113,19 @@ h1{{color:#ff6b35}}p{{color:#a0a0c0}}</style></head>
                        ORDER BY score DESC LIMIT ?""",
                     (limit,),
                 ).fetchall()
-                return [dict(r) for r in rows]
+                enriched = []
+                for r in rows:
+                    item = _enrich_opportunity(dict(r))
+                    # Default reply draft for HITL editor
+                    if not item.get("reply_draft"):
+                        proj_url = self._project_url(item.get("project", ""))
+                        item["reply_draft"] = _default_reply_draft(
+                            item.get("meetup_title", ""),
+                            item.get("meetup_description", ""),
+                            proj_url,
+                        )
+                    enriched.append(item)
+                return enriched
             except Exception as e:
                 return {"error": str(e)}
 
@@ -997,6 +1138,227 @@ h1{{color:#ff6b35}}p{{color:#a0a0c0}}</style></head>
         ):
             try:
                 return self.orch.db.get_rejected_opportunities(hours=hours, limit=limit)
+            except Exception as e:
+                return {"error": str(e)}
+
+        # ── POST /api/opportunities/{target_id}/skip ─────────
+        @app.post("/api/opportunities/{target_id}/skip")
+        async def skip_opportunity(
+            target_id: str,
+            body: OpportunitySkipRequest = OpportunitySkipRequest(),
+            _=Depends(self._verify_token),
+        ):
+            try:
+                opp = self.orch.db.get_opportunity(target_id)
+                if not opp:
+                    return {"ok": False, "error": "Opportunity not found"}
+                if opp.get("status") != "pending":
+                    return {
+                        "ok": False,
+                        "error": f"Opportunity status is '{opp.get('status')}', not pending",
+                    }
+                reason = (body.reason or "human skip").strip() or "human skip"
+                self.orch.db.skip_opportunity(target_id, reason=reason)
+                self.orch.db.log_decision(
+                    "hitl_skip",
+                    opp.get("platform", "reddit"),
+                    opp.get("project", ""),
+                    target_id=target_id,
+                    details=reason,
+                    outcome="skipped",
+                )
+                return {"ok": True, "target_id": target_id, "status": "skipped"}
+            except Exception as e:
+                return {"ok": False, "error": str(e)}
+
+        # ── POST /api/opportunities/{target_id}/approve ──────
+        @app.post("/api/opportunities/{target_id}/approve")
+        async def approve_opportunity(
+            target_id: str,
+            body: OpportunityApproveRequest = OpportunityApproveRequest(),
+            _=Depends(self._verify_token),
+        ):
+            """Approve → local Dottie activity stub; optional Reddit post."""
+            try:
+                if body.post_to_reddit and self._emergency_stopped:
+                    return {
+                        "ok": False,
+                        "error": "Emergency stop active — cannot post to Reddit",
+                    }
+
+                opp = self.orch.db.get_opportunity(target_id)
+                if not opp:
+                    return {"ok": False, "error": "Opportunity not found"}
+                if opp.get("status") != "pending":
+                    return {
+                        "ok": False,
+                        "error": f"Opportunity status is '{opp.get('status')}', not pending",
+                    }
+
+                enriched = _enrich_opportunity(opp)
+                meetup_title = (body.meetup_title or enriched.get("meetup_title") or "").strip()
+                meetup_description = (
+                    body.meetup_description or enriched.get("meetup_description") or ""
+                ).strip()
+                reply_text = (body.reply_text or "").strip()
+                if not reply_text:
+                    reply_text = (
+                        enriched.get("reply_draft")
+                        or _default_reply_draft(
+                            meetup_title,
+                            meetup_description,
+                            self._project_url(enriched.get("project", "")),
+                        )
+                    ).strip()
+
+                activity_id = self.orch.db.insert_dottie_activity(
+                    opportunity_target_id=target_id,
+                    project=enriched.get("project", ""),
+                    reddit_url=enriched.get("url", ""),
+                    subreddit=enriched.get("subreddit", ""),
+                    meetup_title=meetup_title,
+                    meetup_description=meetup_description,
+                    category=enriched.get("category", ""),
+                    group_size=enriched.get("group_size", ""),
+                    urgency=enriched.get("urgency", ""),
+                    dottie_score=enriched.get("dottie_score"),
+                    final_score=enriched.get("final_score") or enriched.get("score"),
+                    why=enriched.get("why", ""),
+                    source_title=enriched.get("title", ""),
+                    reply_text=reply_text,
+                    reddit_posted=False,
+                    status="queued",
+                )
+                self.orch.db.approve_opportunity(target_id)
+                self.orch.db.log_decision(
+                    "hitl_approve",
+                    enriched.get("platform", "reddit"),
+                    enriched.get("project", ""),
+                    target_id=target_id,
+                    details=f"activity_id={activity_id} post_to_reddit={bool(body.post_to_reddit)}",
+                    outcome="approved",
+                )
+
+                reddit_result = {
+                    "attempted": False,
+                    "ok": None,
+                    "comment_id": None,
+                    "error": None,
+                }
+
+                if body.post_to_reddit:
+                    reddit_result["attempted"] = True
+                    post_result = self._hitl_post_to_reddit(
+                        enriched, reply_text, enriched.get("project", ""),
+                    )
+                    reddit_result.update(post_result)
+                    if post_result.get("ok"):
+                        self.orch.db.update_dottie_activity(
+                            activity_id,
+                            reddit_posted=True,
+                            reddit_comment_id=post_result.get("comment_id"),
+                            status="posted",
+                        )
+                        self.orch.db.log_decision(
+                            "hitl_reddit_post",
+                            "reddit",
+                            enriched.get("project", ""),
+                            account=post_result.get("account", ""),
+                            target_id=target_id,
+                            details=f"comment_id={post_result.get('comment_id')}",
+                            outcome="posted",
+                        )
+                    else:
+                        self.orch.db.log_decision(
+                            "hitl_reddit_post",
+                            "reddit",
+                            enriched.get("project", ""),
+                            account=post_result.get("account", ""),
+                            target_id=target_id,
+                            details=post_result.get("error") or "post failed",
+                            outcome="failed",
+                        )
+
+                activity = self.orch.db.get_dottie_activity(activity_id)
+                return {
+                    "ok": True,
+                    "target_id": target_id,
+                    "status": "approved",
+                    "activity": activity,
+                    "reddit": reddit_result,
+                }
+            except Exception as e:
+                logger.exception("HITL approve failed")
+                return {"ok": False, "error": str(e)}
+
+        # ── GET /api/dottie/activities ───────────────────────
+        @app.get("/api/dottie/activities")
+        async def list_dottie_activities(
+            status: str = Query("", description="Filter: queued|exported|posted"),
+            limit: int = Query(50, le=200),
+            _=Depends(self._verify_token),
+        ):
+            try:
+                rows = self.orch.db.get_dottie_activities(
+                    status=status or None, limit=limit,
+                )
+                for r in rows:
+                    r["reddit_posted"] = bool(r.get("reddit_posted"))
+                return rows
+            except Exception as e:
+                return {"error": str(e)}
+
+        # ── GET /api/dottie/activities/export ────────────────
+        @app.get("/api/dottie/activities/export")
+        async def export_dottie_activities(
+            status: str = Query("", description="Optional status filter"),
+            limit: int = Query(200, le=1000),
+            _=Depends(self._verify_token),
+        ):
+            try:
+                rows = self.orch.db.get_dottie_activities(
+                    status=status or None, limit=limit,
+                )
+                payload = []
+                for r in rows:
+                    payload.append({
+                        "id": r.get("id"),
+                        "created_at": r.get("created_at"),
+                        "opportunity_target_id": r.get("opportunity_target_id"),
+                        "project": r.get("project"),
+                        "reddit_url": r.get("reddit_url"),
+                        "subreddit": r.get("subreddit"),
+                        "meetup_title": r.get("meetup_title"),
+                        "meetup_description": r.get("meetup_description"),
+                        "category": r.get("category"),
+                        "group_size": r.get("group_size"),
+                        "urgency": r.get("urgency"),
+                        "dottie_score": r.get("dottie_score"),
+                        "final_score": r.get("final_score"),
+                        "why": r.get("why"),
+                        "source_title": r.get("source_title"),
+                        "reply_text": r.get("reply_text"),
+                        "reddit_posted": bool(r.get("reddit_posted")),
+                        "reddit_comment_id": r.get("reddit_comment_id"),
+                        "status": r.get("status"),
+                    })
+                    # Mark exported (except already posted)
+                    if r.get("status") == "queued":
+                        try:
+                            self.orch.db.update_dottie_activity(
+                                r["id"], status="exported",
+                            )
+                        except Exception:
+                            pass
+                ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+                return JSONResponse(
+                    content=payload,
+                    headers={
+                        "Content-Disposition": (
+                            f'attachment; filename="dottie_activities_{ts}.json"'
+                        ),
+                    },
+                )
             except Exception as e:
                 return {"error": str(e)}
 
@@ -1413,9 +1775,13 @@ h1{{color:#ff6b35}}p{{color:#a0a0c0}}</style></head>
         @app.post("/api/control/scan")
         async def control_scan(_=Depends(self._verify_token)):
             if self._emergency_stopped:
-                return {"ok": False, "error": "Emergency stop active"}
-            threading.Thread(target=self.orch._scan_all_safe, daemon=True).start()
-            return {"ok": True, "message": "Scan started"}
+                return {"ok": False, "error": "Emergency stop active — click Reset first"}
+            # force=True: discovery while paused (no auto-post); act still blocked
+            threading.Thread(
+                target=lambda: self.orch._scan_all_safe(force=True),
+                daemon=True,
+            ).start()
+            return {"ok": True, "message": "Scan started (works while paused)"}
 
         @app.post("/api/control/learn")
         async def control_learn(_=Depends(self._verify_token)):

@@ -26,7 +26,7 @@ class Database:
     Writes are serialized with a threading.Lock to prevent WAL contention.
     """
 
-    SCHEMA_VERSION = 4
+    SCHEMA_VERSION = 5
 
     def __init__(self, db_path: str = "data/miloagent.db"):
         self.db_path = db_path
@@ -482,6 +482,35 @@ class Database:
                     ON decision_log(decision_type, timestamp DESC);
             """)
 
+            # HITL: local Dottie activity stubs (v5)
+            self.conn.executescript("""
+                CREATE TABLE IF NOT EXISTS dottie_activities (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    opportunity_target_id TEXT NOT NULL,
+                    project TEXT NOT NULL,
+                    reddit_url TEXT,
+                    subreddit TEXT,
+                    meetup_title TEXT,
+                    meetup_description TEXT,
+                    category TEXT,
+                    group_size TEXT,
+                    urgency TEXT,
+                    dottie_score REAL,
+                    final_score REAL,
+                    why TEXT,
+                    source_title TEXT,
+                    reply_text TEXT,
+                    reddit_posted INTEGER DEFAULT 0,
+                    reddit_comment_id TEXT,
+                    status TEXT DEFAULT 'queued'
+                );
+                CREATE INDEX IF NOT EXISTS idx_dottie_activities_status
+                    ON dottie_activities(status, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_dottie_activities_target
+                    ON dottie_activities(opportunity_target_id);
+            """)
+
         # Conversation memory: track what each account said
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS account_comments (
@@ -877,6 +906,124 @@ class Database:
             (since, limit),
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def get_opportunity(self, target_id: str) -> Optional[Dict]:
+        """Fetch a single opportunity by target_id."""
+        row = self.conn.execute(
+            "SELECT * FROM opportunities WHERE target_id = ?",
+            (target_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def skip_opportunity(self, target_id: str, reason: str = "human skip") -> bool:
+        """Mark opportunity skipped (HITL). Returns False if not found."""
+        opp = self.get_opportunity(target_id)
+        if not opp:
+            return False
+        self.update_opportunity_status(target_id, "skipped", rejection_reason=reason)
+        return True
+
+    def approve_opportunity(self, target_id: str) -> bool:
+        """Mark opportunity approved (HITL). Returns False if not found."""
+        opp = self.get_opportunity(target_id)
+        if not opp:
+            return False
+        self.update_opportunity_status(target_id, "approved")
+        return True
+
+    # ── Dottie Activities (HITL stub) ─────────────────────────────────
+
+    def insert_dottie_activity(
+        self,
+        opportunity_target_id: str,
+        project: str,
+        reddit_url: str = "",
+        subreddit: str = "",
+        meetup_title: str = "",
+        meetup_description: str = "",
+        category: str = "",
+        group_size: str = "",
+        urgency: str = "",
+        dottie_score: Optional[float] = None,
+        final_score: Optional[float] = None,
+        why: str = "",
+        source_title: str = "",
+        reply_text: str = "",
+        reddit_posted: bool = False,
+        reddit_comment_id: Optional[str] = None,
+        status: str = "queued",
+    ) -> int:
+        """Insert a local Dottie activity stub from HITL approve."""
+        cursor = self._execute_write(
+            """INSERT INTO dottie_activities
+               (opportunity_target_id, project, reddit_url, subreddit,
+                meetup_title, meetup_description, category, group_size, urgency,
+                dottie_score, final_score, why, source_title, reply_text,
+                reddit_posted, reddit_comment_id, status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                opportunity_target_id, project, reddit_url, subreddit,
+                meetup_title, meetup_description, category, group_size, urgency,
+                dottie_score, final_score, why, source_title, reply_text,
+                1 if reddit_posted else 0, reddit_comment_id, status,
+            ),
+        )
+        return cursor.lastrowid
+
+    def get_dottie_activities(
+        self,
+        status: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict]:
+        """List Dottie activity stubs (newest first)."""
+        query = "SELECT * FROM dottie_activities"
+        params: list = []
+        if status:
+            query += " WHERE status = ?"
+            params.append(status)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        rows = self.conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_dottie_activity(
+        self,
+        activity_id: int,
+        reddit_posted: Optional[bool] = None,
+        reddit_comment_id: Optional[str] = None,
+        status: Optional[str] = None,
+        reply_text: Optional[str] = None,
+    ):
+        """Update fields on a Dottie activity stub."""
+        sets = []
+        params: list = []
+        if reddit_posted is not None:
+            sets.append("reddit_posted = ?")
+            params.append(1 if reddit_posted else 0)
+        if reddit_comment_id is not None:
+            sets.append("reddit_comment_id = ?")
+            params.append(reddit_comment_id)
+        if status is not None:
+            sets.append("status = ?")
+            params.append(status)
+        if reply_text is not None:
+            sets.append("reply_text = ?")
+            params.append(reply_text)
+        if not sets:
+            return
+        params.append(activity_id)
+        self._execute_write(
+            f"UPDATE dottie_activities SET {', '.join(sets)} WHERE id = ?",
+            tuple(params),
+        )
+
+    def get_dottie_activity(self, activity_id: int) -> Optional[Dict]:
+        """Fetch a single Dottie activity by id."""
+        row = self.conn.execute(
+            "SELECT * FROM dottie_activities WHERE id = ?",
+            (activity_id,),
+        ).fetchone()
+        return dict(row) if row else None
 
     # ── Decision Log ──────────────────────────────────────────────────
 

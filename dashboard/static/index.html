@@ -233,8 +233,12 @@
           <div id="insightsPanel"></div>
         </div>
         <div class="card glow-orange">
-          <h2>Top Opportunities</h2>
-          <div id="oppsList" class="feed" style="max-height:320px"></div>
+          <h2>Top Opportunities <span style="font-size:11px;font-weight:400;color:var(--text3)">HITL</span></h2>
+          <div id="oppsList" class="feed" style="max-height:520px;overflow-y:auto"></div>
+        </div>
+        <div class="card glow-cyan">
+          <h2>Dottie Queue <button class="btn btn-xs" style="float:right;margin-top:-2px" onclick="exportDottieActivities()">Export JSON</button></h2>
+          <div id="dottieQueue" class="feed" style="max-height:320px;overflow-y:auto"></div>
         </div>
         <div class="card full glow-cyan">
           <h2><span class="card-icon">&#9733;</span> AI Decision Log <span class="badge-count" id="decisionCount">0</span></h2>

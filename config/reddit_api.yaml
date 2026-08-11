@@ -1,10 +1,11 @@
-# Reddit API credentials (web app type)
-# Get these from: https://www.reddit.com/prefs/apps
-# Type: web app
-# Redirect URI: https://your-domain.com/api/reddit/oauth/callback
+# Reddit API OAuth app settings (non-secret redirect only)
+# Secrets from .env:
+#   MILO_REDDIT_API_CLIENT_ID=...
+#   MILO_REDDIT_API_CLIENT_SECRET=...
+#   MILO_REDDIT_API_REDIRECT_URI=https://your-domain.com/api/reddit/oauth/callback
 #
-# Copy this file to reddit_api.local.yaml and fill in real credentials:
+# Create app at: https://www.reddit.com/prefs/apps (type: web app)
 
-client_id: "YOUR_CLIENT_ID_HERE"
-client_secret: "YOUR_CLIENT_SECRET_HERE"
-redirect_uri: "https://your-domain.com/api/reddit/oauth/callback"
+client_id: ""
+client_secret: ""
+redirect_uri: "http://localhost:8420/api/reddit/oauth/callback"

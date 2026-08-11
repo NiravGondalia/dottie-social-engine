@@ -67,14 +67,18 @@ def load_yaml(path: str) -> dict:
 
     On servers, rename your real config to e.g. llm.local.yaml so
     ``git pull`` never overwrites it (*.local.yaml is gitignored).
+    Secrets (passwords, API keys, tokens) are resolved from env only.
     """
+    from core.secrets import hydrate_config
+
+    actual = path
     if path.endswith(".yaml"):
         local_path = path[:-5] + ".local.yaml"
         if os.path.exists(local_path):
-            with open(local_path) as f:
-                return yaml.safe_load(f) or {}
-    with open(path) as f:
-        return yaml.safe_load(f) or {}
+            actual = local_path
+    with open(actual) as f:
+        data = yaml.safe_load(f) or {}
+    return hydrate_config(path, data)
 
 
 class Orchestrator:
@@ -282,6 +286,14 @@ class Orchestrator:
         if self._paused:
             return False
         return self.resource_monitor.is_safe_to_proceed()
+
+    def _scan_blocked_reason(self, force: bool = False) -> str:
+        """Why a scan cannot run (empty string = ok)."""
+        if self._paused and not force:
+            return "paused"
+        if not self.resource_monitor.is_safe_to_proceed():
+            return "resources"
+        return ""
 
     def _get_reddit_bot(self, account: Dict):
         """Get or create a Reddit bot for an account."""
@@ -660,15 +672,26 @@ class Orchestrator:
 
     # ── Safe Wrappers (with timeout + resource check) ────────────────
 
-    def _scan_all_safe(self):
-        """Wrapper: run _scan_all with a hard timeout."""
-        if not self._check_resources():
+    def _scan_all_safe(self, force: bool = False):
+        """Wrapper: run _scan_all with a hard timeout.
+
+        force=True: manual Scan Now — allowed while paused (discovery-only;
+        act/engage still respect pause). Still blocked by real resource limits.
+        """
+        reason = self._scan_blocked_reason(force=force)
+        if reason == "paused":
+            logger.info(
+                "Scan skipped: bot is paused "
+                "(Press Scan Now is OK while paused; scheduled scans stay off)"
+            )
+            return
+        if reason == "resources":
             logger.info("Scan skipped: resources too low")
             return
 
         # Run scan in a thread with hard timeout
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(self._scan_all)
+            future = pool.submit(self._scan_all, force)
             try:
                 future.result(timeout=SCAN_TIMEOUT_SECONDS)
             except concurrent.futures.TimeoutError:
@@ -698,7 +721,7 @@ class Orchestrator:
 
     # ── Scheduled Jobs ───────────────────────────────────────────────
 
-    def _scan_all(self):
+    def _scan_all(self, force: bool = False):
         """Scan platforms for all projects.
 
         SAFETY LIMITS:
@@ -710,22 +733,22 @@ class Orchestrator:
         if self._scan_running:
             logger.info("Scan already in progress, skipping")
             return
-        if self._paused:
+        if self._paused and not force:
             logger.debug("Bot is paused, skipping scan")
             return
-        if not self.rate_limiter.is_active_hours():
+        if not self.rate_limiter.is_active_hours() and not force:
             logger.debug("Outside active hours, skipping scan")
             return
-        if self.rate_limiter.should_take_random_break():
+        if self.rate_limiter.should_take_random_break() and not force:
             logger.info("Taking a random break (human simulation)")
             return
         self._scan_running = True
         try:
-            self.__scan_all_inner()
+            self.__scan_all_inner(force=force)
         finally:
             self._scan_running = False
 
-    def __scan_all_inner(self):
+    def __scan_all_inner(self, force: bool = False):
         """Inner scan logic — always called with _scan_running=True.
 
         Projects are scanned in parallel (SCAN_MAX_WORKERS concurrent threads).
@@ -737,13 +760,21 @@ class Orchestrator:
             logger.info("System resources critical, skipping scan")
             return
 
-        logger.info("Starting scan cycle...")
+        logger.info(
+            "Starting scan cycle%s...",
+            " (manual / discovery-while-paused)" if force else "",
+        )
 
         def _scan_one_project(project: dict) -> None:
             """Scan a single project — runs in a thread pool worker."""
             proj_name = project.get("project", {}).get("name", "unknown")
             try:
-                if not self._check_resources():
+                # When force (Scan Now while paused), only hard resource limits apply
+                if force:
+                    if not self.resource_monitor.is_safe_to_proceed():
+                        logger.debug(f"Scan {proj_name}: resources low, skipping")
+                        return
+                elif not self._check_resources():
                     logger.debug(f"Scan {proj_name}: resources low, skipping")
                     return
                 scan_project = self._expand_project_targets(project)

@@ -15,19 +15,44 @@ PROJECT_ROOT = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 
+def _load_dotenv(path: Path = PROJECT_ROOT / ".env") -> None:
+    """Load KEY=VALUE pairs from .env into os.environ (does not override existing)."""
+    if not path.is_file():
+        return
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip("'").strip('"')
+            if key and key not in os.environ:
+                os.environ[key] = value
+    except OSError:
+        pass
+
+
+_load_dotenv()
+
+
 def load_yaml(path: str) -> dict:
     """Load YAML config, preferring .local.yaml override if it exists.
 
     On servers, rename your real config to e.g. llm.local.yaml so
     ``git pull`` never overwrites it (*.local.yaml is gitignored).
+    Secrets (passwords, API keys, tokens) are resolved from env only.
     """
+    from core.secrets import hydrate_config
+
+    actual = path
     if path.endswith(".yaml"):
         local_path = path[:-5] + ".local.yaml"
         if os.path.exists(local_path):
-            with open(local_path) as f:
-                return yaml.safe_load(f) or {}
-    with open(path) as f:
-        return yaml.safe_load(f) or {}
+            actual = local_path
+    with open(actual) as f:
+        data = yaml.safe_load(f) or {}
+    return hydrate_config(path, data)
 
 
 def load_projects(projects_dir: str = "projects/") -> list:
@@ -266,6 +291,15 @@ def scan(ctx, platform, project):
         projects = [matched]
 
     if platform in ("reddit", "all"):
+        if not projects:
+            click.echo(click.style(
+                "No enabled projects found. Copy projects/example_project.yaml "
+                "→ projects/your_name.yaml and set enabled: true "
+                "(or use projects/dottie.yaml).",
+                fg="yellow",
+            ))
+            db.close()
+            return
         _scan_reddit(db, content_gen, projects)
 
     if platform in ("twitter", "all"):
@@ -314,14 +348,22 @@ def _scan_reddit(db, content_gen, projects):
         opportunities = bot.scan(proj)
         click.echo(f"  Found {len(opportunities)} opportunities:")
         for opp in opportunities[:10]:
-            score_color = "green" if opp["relevance_score"] >= 7 else (
-                "yellow" if opp["relevance_score"] >= 5 else "red"
+            score = opp.get("final_score", opp.get("relevance_score", 0))
+            score_color = "green" if score >= 7 else (
+                "yellow" if score >= 5 else "red"
             )
-            score_str = f"{opp['relevance_score']:.1f}"
+            score_str = f"{score:.1f}"
+            dottie = opp.get("dottie_score")
+            dottie_bit = f" Dottie {dottie}/12" if dottie is not None else ""
+            label = opp.get("meetup_title") or opp.get("title", "")
             click.echo(
-                f"  [{click.style(score_str, fg=score_color)}] "
-                f"r/{opp['subreddit']}: {opp['title'][:60]}"
+                f"  [{click.style(score_str, fg=score_color)}]{dottie_bit} "
+                f"r/{opp.get('subreddit', '?')}: {label[:60]}"
             )
+            if opp.get("why"):
+                click.echo(f"      → {opp['why'][:90]}")
+            if opp.get("url"):
+                click.echo(f"      {opp['url']}")
 
 
 def _scan_twitter(db, content_gen, projects):
@@ -879,50 +921,66 @@ def test(service):
 @cli.command()
 def setup():
     """Check configuration and guide setup."""
+    from core.secrets import resolve_llm_api_key
+
     click.echo("\n=== Milo Setup Check ===\n")
 
-    all_warnings = []
-
-    configs = {
-        "settings": "config/settings.yaml",
-        "llm": "config/llm.yaml",
-        "reddit": "config/reddit_accounts.yaml",
-        "twitter": "config/twitter_accounts.yaml",
-        "telegram": "config/telegram.yaml",
-    }
-
-    for name, path in configs.items():
-        if os.path.exists(path):
-            data = load_yaml(path)
-            warnings = check_config_placeholders(data, name)
-            if warnings:
-                click.echo(click.style(f"  {name}: needs configuration", fg="yellow"))
-                all_warnings.extend(warnings)
-            else:
-                click.echo(click.style(f"  {name}: OK", fg="green"))
+    # LLM keys (env-only)
+    llm_ok = False
+    for provider in ("groq", "gemini", "claude"):
+        if resolve_llm_api_key(provider):
+            click.echo(click.style(f"  llm/{provider}: OK (.env)", fg="green"))
+            llm_ok = True
         else:
-            click.echo(click.style(f"  {name}: MISSING ({path})", fg="red"))
+            click.echo(click.style(f"  llm/{provider}: missing MILO_{provider.upper() if provider != 'claude' else 'ANTHROPIC'}_API_KEY", fg="yellow"))
+    if not llm_ok:
+        click.echo(click.style("  → Set at least one LLM key in .env", fg="yellow"))
 
-    # Check projects
+    # Reddit (env username required for slot 1)
+    reddit_cfg = load_yaml("config/reddit_accounts.yaml")
+    reddit_ready = False
+    for i, acc in enumerate(reddit_cfg.get("accounts", []), start=1):
+        if not acc.get("enabled", True):
+            continue
+        user = acc.get("username") or ""
+        has_pass = bool(acc.get("password"))
+        has_cookies = os.path.exists(acc.get("cookies_file", ""))
+        if user:
+            reddit_ready = True
+            cookie_note = "cookies ok" if has_cookies else "no cookies yet (run login reddit)"
+            pass_note = "password set" if has_pass else "password empty (ok if using cookies)"
+            click.echo(click.style(
+                f"  reddit slot {i}: @{user} — {pass_note}, {cookie_note}",
+                fg="green",
+            ))
+        else:
+            click.echo(click.style(
+                f"  reddit slot {i}: set MILO_REDDIT_USERNAME (or MILO_REDDIT_{i}_USERNAME) in .env",
+                fg="yellow",
+            ))
+    if not reddit_ready:
+        click.echo(click.style("  → Reddit credentials belong in .env, not YAML", fg="yellow"))
+
+    # Telegram bot (optional)
+    tg = load_yaml("config/telegram.yaml")
+    if tg.get("bot_token"):
+        click.echo(click.style("  telegram bot: OK (.env)", fg="green"))
+    else:
+        click.echo("  telegram bot: skipped (optional)")
+
+    # Projects
     projects = load_projects()
     click.echo(f"\n  Projects found: {len(projects)}")
     for p in projects:
         click.echo(f"    - {p['project']['name']}")
 
-    if all_warnings:
-        click.echo(click.style("\nPlaceholder values found:", fg="yellow"))
-        for w in all_warnings:
-            click.echo(w)
-        click.echo(
-            "\nEdit the config files to replace YOUR_* values with real credentials."
-        )
-        click.echo("\nQuick links:")
-        click.echo("  Groq API Key:    https://console.groq.com")
-        click.echo("  Gemini API Key:  https://aistudio.google.com")
-        click.echo("  Reddit App:      https://www.reddit.com/prefs/apps")
-        click.echo("  Telegram Bot:    Message @BotFather on Telegram")
-    else:
-        click.echo(click.style("\nAll configs look good!", fg="green"))
+    click.echo("\nSecrets go in .env — see .env.example")
+    click.echo("Quick links:")
+    click.echo("  Groq API Key:    https://console.groq.com")
+    click.echo("  Gemini API Key:  https://aistudio.google.com")
+    click.echo("  Reddit login:    python miloagent.py login reddit")
+    if llm_ok and reddit_ready:
+        click.echo(click.style("\nCore POC config looks ready.", fg="green"))
         click.echo("Run 'python miloagent.py test all' to verify connections.")
 
 
