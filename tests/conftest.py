@@ -32,6 +32,10 @@ def fake_orch(db):
     orch.projects = [
         {"project": {"name": "dottie", "url": "https://dottie.app"}},
     ]
+    orch.settings = {
+        "web_dashboard": {"port": 8420},
+        "bot": {"scan_interval_minutes": 12, "version": "test"},
+    }
     orch.get_scan_status = MagicMock(side_effect=lambda: {
         **orch._scan_status,
         "running": orch._scan_running,
