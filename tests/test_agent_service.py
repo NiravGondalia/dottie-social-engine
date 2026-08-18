@@ -188,3 +188,37 @@ def test_concurrent_scan_calls_start_only_one_scan(fake_orch):
     assert duplicate["job_id"] == started["job_id"]
     assert duplicate["scan"]["running"] is True
     assert fake_orch._scan_all_safe.call_count == 1
+
+
+def test_skip_pending(db, fake_orch):
+    db.log_opportunity("reddit", "tid1", "Hike?", "toronto", 8.0, "dottie")
+    svc = AgentService(fake_orch, emergency_stopped_fn=lambda: False)
+    out = svc.skip("tid1", reason="not a fit")
+    assert out["ok"] is True
+    assert db.get_opportunity("tid1")["status"] == "skipped"
+
+
+def test_approve_blocked_by_emergency_stop(db, fake_orch):
+    db.log_opportunity("reddit", "tid1", "Hike?", "toronto", 8.0, "dottie")
+    svc = AgentService(fake_orch, emergency_stopped_fn=lambda: True)
+    out = svc.approve_post("tid1", "hi")
+    assert out["ok"] is False
+    assert "emergency" in out["error"].lower()
+
+
+def test_approve_posts_via_reddit_bot(db, fake_orch):
+    db.log_opportunity(
+        "reddit", "tid1", "Hike?", "toronto", 8.0, "dottie",
+        metadata={"url": "https://reddit.com/r/toronto/comments/tid1"},
+    )
+    account = {"username": "poster"}
+    fake_orch.account_mgr.get_next_account.return_value = account
+    bot = type("B", (), {})()
+    bot.post_comment_text = lambda *a, **k: {"ok": True, "comment_id": "c1"}
+    fake_orch._get_reddit_bot.return_value = bot
+    svc = AgentService(fake_orch, emergency_stopped_fn=lambda: False)
+    out = svc.approve_post("tid1", "final copy")
+    assert out["ok"] is True
+    assert out["reddit"]["ok"] is True
+    assert out["reddit"]["comment_id"] == "c1"
+    assert db.get_opportunity("tid1")["status"] == "approved"

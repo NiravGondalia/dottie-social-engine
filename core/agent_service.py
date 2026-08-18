@@ -171,6 +171,185 @@ class AgentService:
             "reply_draft": text,
         }
 
+    def skip(self, target_id: str, reason: str = "human skip") -> dict:
+        """Mark a pending opportunity skipped without posting."""
+        row = self.orch.db.get_opportunity(target_id)
+        if row is None:
+            return {
+                "ok": False,
+                "target_id": target_id,
+                "error": "Opportunity not found",
+            }
+        if row.get("status") != "pending":
+            return {
+                "ok": False,
+                "target_id": target_id,
+                "error": (
+                    f"Opportunity status is '{row.get('status')}', not pending"
+                ),
+            }
+        skip_reason = (reason or "human skip").strip() or "human skip"
+        self.orch.db.skip_opportunity(target_id, reason=skip_reason)
+        log_decision = getattr(self.orch.db, "log_decision", None)
+        if callable(log_decision):
+            log_decision(
+                "hitl_skip",
+                row.get("platform", "reddit"),
+                row.get("project", ""),
+                target_id=target_id,
+                details=skip_reason,
+                outcome="skipped",
+            )
+        return {"ok": True, "target_id": target_id, "status": "skipped"}
+
+    def approve_post(self, target_id: str, reply_text: str) -> dict:
+        """Approve a pending opportunity and post the reply to Reddit."""
+        if self.emergency_stopped_fn():
+            return {
+                "ok": False,
+                "target_id": target_id,
+                "error": "Emergency stop active — cannot post to Reddit",
+            }
+
+        row = self.orch.db.get_opportunity(target_id)
+        if row is None:
+            return {
+                "ok": False,
+                "target_id": target_id,
+                "error": "Opportunity not found",
+            }
+        if row.get("status") != "pending":
+            return {
+                "ok": False,
+                "target_id": target_id,
+                "error": (
+                    f"Opportunity status is '{row.get('status')}', not pending"
+                ),
+            }
+
+        signal = opportunity_to_signal(row, include_reply=True)
+        text = (reply_text or "").strip()
+        if not text:
+            text = (signal.get("reply_draft") or "").strip()
+        if not text:
+            return {
+                "ok": False,
+                "target_id": target_id,
+                "error": "No reply text",
+            }
+
+        project_name = signal.get("project") or ""
+        activity_id = self.orch.db.insert_dottie_activity(
+            opportunity_target_id=target_id,
+            project=project_name,
+            reddit_url=signal.get("url") or "",
+            subreddit=signal.get("subreddit") or "",
+            meetup_title=signal.get("meetup_title") or "",
+            meetup_description=signal.get("meetup_description") or "",
+            category=signal.get("category") or "",
+            group_size=signal.get("group_size") or "",
+            urgency=signal.get("urgency") or "",
+            dottie_score=signal.get("dottie_score"),
+            final_score=signal.get("final_score") or signal.get("score"),
+            why=signal.get("why") or "",
+            source_title=signal.get("title") or "",
+            reply_text=text,
+            reddit_posted=False,
+            status="queued",
+        )
+        self.orch.db.approve_opportunity(target_id)
+        log_decision = getattr(self.orch.db, "log_decision", None)
+        if callable(log_decision):
+            log_decision(
+                "hitl_approve",
+                row.get("platform", "reddit"),
+                project_name,
+                target_id=target_id,
+                details=f"activity_id={activity_id} post_to_reddit=True",
+                outcome="approved",
+            )
+
+        reddit_result = self._post_to_reddit(row, signal, text, project_name)
+        if reddit_result.get("ok"):
+            self.orch.db.update_dottie_activity(
+                activity_id,
+                reddit_posted=True,
+                reddit_comment_id=reddit_result.get("comment_id"),
+                status="posted",
+            )
+            if callable(log_decision):
+                log_decision(
+                    "hitl_reddit_post",
+                    "reddit",
+                    project_name,
+                    account=reddit_result.get("account", ""),
+                    target_id=target_id,
+                    details=f"comment_id={reddit_result.get('comment_id')}",
+                    outcome="posted",
+                )
+        elif callable(log_decision):
+            log_decision(
+                "hitl_reddit_post",
+                "reddit",
+                project_name,
+                account=reddit_result.get("account", ""),
+                target_id=target_id,
+                details=reddit_result.get("error") or "post failed",
+                outcome="failed",
+            )
+
+        return {
+            "ok": True,
+            "target_id": target_id,
+            "status": "approved",
+            "reddit": reddit_result,
+        }
+
+    def _post_to_reddit(
+        self,
+        row: Dict[str, Any],
+        signal: Dict[str, Any],
+        reply_text: str,
+        project_name: str,
+    ) -> Dict[str, Any]:
+        """Post via the existing HITL Reddit bot path."""
+        account = self.orch.account_mgr.get_next_account(
+            "reddit",
+            project=project_name,
+        )
+        if not account:
+            return {
+                "attempted": True,
+                "ok": False,
+                "comment_id": None,
+                "error": "No available Reddit account",
+                "account": "",
+            }
+        bot = self.orch._get_reddit_bot(account)
+        if not hasattr(bot, "post_comment_text"):
+            return {
+                "attempted": True,
+                "ok": False,
+                "comment_id": None,
+                "error": "Reddit bot does not support HITL post_comment_text",
+                "account": account.get("username", ""),
+            }
+        payload = dict(row)
+        payload["subreddit"] = signal.get("subreddit") or payload.get(
+            "subreddit_or_query",
+            "",
+        )
+        result = bot.post_comment_text(
+            payload,
+            reply_text,
+            project_name=project_name,
+            update_opportunity_status=False,
+        )
+        out = dict(result) if isinstance(result, dict) else {"ok": bool(result)}
+        out["attempted"] = True
+        out["account"] = account.get("username", "")
+        return out
+
     def _raw_scan_status(self) -> Dict[str, Any]:
         getter = getattr(self.orch, "get_scan_status", None)
         if callable(getter):
