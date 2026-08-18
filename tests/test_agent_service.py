@@ -66,6 +66,28 @@ def test_revise_reply_uses_instruction(db, fake_orch):
     assert "long draft" in blob
 
 
+def test_scan_running_true_before_orchestrator_sets_flag(fake_orch):
+    """scan() must not return state=running with running=False."""
+    scan_started = threading.Event()
+    release_scan = threading.Event()
+
+    def blocked_scan(**_):
+        scan_started.set()
+        assert release_scan.wait(timeout=5)
+
+    fake_orch._scan_all_safe.side_effect = blocked_scan
+    svc = AgentService(fake_orch, emergency_stopped_fn=lambda: False)
+
+    out = svc.scan()
+
+    assert scan_started.wait(timeout=5)
+    assert out["scan"]["state"] == "running"
+    assert out["scan"]["running"] is True
+    assert fake_orch._scan_running is False
+
+    release_scan.set()
+
+
 def test_scan_starts_force_thread(fake_orch):
     scan_called = threading.Event()
     fake_orch._scan_all_safe.side_effect = lambda **_: scan_called.set()

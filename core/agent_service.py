@@ -55,6 +55,8 @@ class AgentService:
         thread.start()
 
         scan = self._raw_scan_status()
+        if scan.get("state") == "running":
+            scan["running"] = True
         return {
             "ok": True,
             "already_running": False,
