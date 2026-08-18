@@ -1,3 +1,5 @@
+import threading
+
 from core.agent_service import AgentService
 
 
@@ -65,12 +67,43 @@ def test_revise_reply_uses_instruction(db, fake_orch):
 
 
 def test_scan_starts_force_thread(fake_orch):
+    scan_called = threading.Event()
+    fake_orch._scan_all_safe.side_effect = lambda **_: scan_called.set()
     svc = AgentService(fake_orch, emergency_stopped_fn=lambda: False)
     out = svc.scan()
     assert out["ok"] is True
     assert out["already_running"] is False
     assert out["job_id"]
+    assert scan_called.wait(timeout=1)
     fake_orch._scan_all_safe.assert_called_with(force=True)
+
+
+def test_scan_preserves_completed_status_after_start(fake_orch, monkeypatch):
+    class ImmediateThread:
+        def __init__(self, *, target, daemon):
+            self.target = target
+            self.daemon = daemon
+
+        def start(self):
+            self.target()
+
+    def complete_scan(**_):
+        fake_orch._scan_status.update(
+            {
+                "state": "completed",
+                "message": "Done",
+                "finished_at": "now",
+            },
+        )
+
+    fake_orch._scan_all_safe.side_effect = complete_scan
+    monkeypatch.setattr("core.agent_service.threading.Thread", ImmediateThread)
+    svc = AgentService(fake_orch, emergency_stopped_fn=lambda: False)
+
+    out = svc.scan()
+
+    assert out["scan"]["state"] == "completed"
+    assert out["scan"]["running"] is False
 
 
 def test_scan_already_running(fake_orch):
@@ -79,3 +112,48 @@ def test_scan_already_running(fake_orch):
     out = svc.scan()
     assert out["already_running"] is True
     fake_orch._scan_all_safe.assert_not_called()
+
+
+def test_concurrent_scan_calls_start_only_one_scan(fake_orch):
+    class BarrierLock:
+        def __init__(self):
+            self.barrier = threading.Barrier(2)
+            self.lock = threading.Lock()
+
+        def __enter__(self):
+            self.barrier.wait(timeout=5)
+            self.lock.acquire()
+            return self
+
+        def __exit__(self, *_):
+            self.lock.release()
+
+    scan_started = threading.Event()
+    release_scan = threading.Event()
+
+    def blocked_scan(**_):
+        scan_started.set()
+        assert release_scan.wait(timeout=5)
+
+    fake_orch._state_lock = BarrierLock()
+    fake_orch._scan_all_safe.side_effect = blocked_scan
+    svc = AgentService(fake_orch, emergency_stopped_fn=lambda: False)
+    results = []
+
+    callers = [
+        threading.Thread(target=lambda: results.append(svc.scan()))
+        for _ in range(2)
+    ]
+    for caller in callers:
+        caller.start()
+    assert scan_started.wait(timeout=5)
+    for caller in callers:
+        caller.join(timeout=5)
+    release_scan.set()
+
+    assert len(results) == 2
+    started = next(result for result in results if not result["already_running"])
+    duplicate = next(result for result in results if result["already_running"])
+    assert duplicate["job_id"] == started["job_id"]
+    assert duplicate["scan"]["running"] is True
+    assert fake_orch._scan_all_safe.call_count == 1

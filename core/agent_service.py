@@ -32,31 +32,21 @@ class AgentService:
                 "scan": self.get_scan_status(),
             }
 
-        current = self._raw_scan_status()
-        if (
-            current.get("running")
-            or current.get("state") == "running"
-            or getattr(self.orch, "_scan_running", False)
-        ):
+        job_id = uuid.uuid4().hex
+        lock = getattr(self.orch, "_state_lock", None)
+        if lock is not None:
+            with lock:
+                already_running, current = self._reserve_scan(job_id)
+        else:
+            already_running, current = self._reserve_scan(job_id)
+
+        if already_running:
             return {
                 "ok": True,
                 "already_running": True,
                 "job_id": current.get("job_id"),
                 "scan": current,
             }
-
-        job_id = uuid.uuid4().hex
-        status = getattr(self.orch, "_scan_status", None)
-        if not isinstance(status, dict):
-            status = {}
-            self.orch._scan_status = status
-
-        lock = getattr(self.orch, "_state_lock", None)
-        if lock is not None:
-            with lock:
-                self._mark_scan_started(status, job_id)
-        else:
-            self._mark_scan_started(status, job_id)
 
         thread = threading.Thread(
             target=lambda: self.orch._scan_all_safe(force=True),
@@ -65,17 +55,10 @@ class AgentService:
         thread.start()
 
         scan = self._raw_scan_status()
-        scan.update(
-            {
-                "job_id": job_id,
-                "state": scan.get("state") or "running",
-                "running": True,
-            },
-        )
         return {
             "ok": True,
             "already_running": False,
-            "job_id": job_id,
+            "job_id": scan.get("job_id", job_id),
             "scan": scan,
         }
 
@@ -194,6 +177,30 @@ class AgentService:
             return dict(getter() or {})
         status = getattr(self.orch, "_scan_status", None)
         return dict(status) if isinstance(status, dict) else {}
+
+    def _reserve_scan(self, job_id: str) -> tuple[bool, dict]:
+        """Atomically inspect and reserve orchestrator scan state."""
+        status = getattr(self.orch, "_scan_status", None)
+        if not isinstance(status, dict):
+            status = {}
+            self.orch._scan_status = status
+
+        current = dict(status)
+        orchestrator_running = bool(getattr(self.orch, "_scan_running", False))
+        already_running = (
+            orchestrator_running
+            or bool(current.get("running"))
+            or current.get("state") == "running"
+        )
+        current["running"] = already_running
+        if orchestrator_running:
+            current["state"] = "running"
+
+        if not already_running:
+            self._mark_scan_started(status, job_id)
+            current = dict(status)
+            current["running"] = True
+        return already_running, current
 
     @staticmethod
     def _mark_scan_started(status: dict, job_id: str) -> None:
