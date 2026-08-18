@@ -164,6 +164,13 @@ class Orchestrator:
         self._paused = False
         self._running = False
         self._scan_running = False  # Guard against concurrent scans
+        self._scan_status = {
+            "state": "idle",
+            "message": "",
+            "started_at": None,
+            "finished_at": None,
+            "opportunities": None,
+        }
 
         # Platform bots (initialized per-account on demand)
         self._reddit_bots: Dict[str, RedditBot] = {}
@@ -294,6 +301,27 @@ class Orchestrator:
         if not self.resource_monitor.is_safe_to_proceed():
             return "resources"
         return ""
+
+    def _set_scan_status(self, state: str, message: str = "", opportunities=None):
+        now = datetime.utcnow().isoformat() + "Z"
+        with self._state_lock:
+            self._scan_status["state"] = state
+            self._scan_status["message"] = message or ""
+            if state == "running":
+                self._scan_status["started_at"] = now
+                self._scan_status["finished_at"] = None
+            elif state in ("completed", "failed", "skipped"):
+                self._scan_status["finished_at"] = now
+            if opportunities is not None:
+                self._scan_status["opportunities"] = opportunities
+
+    def get_scan_status(self) -> Dict:
+        with self._state_lock:
+            out = dict(self._scan_status)
+        out["running"] = bool(self._scan_running)
+        if self._scan_running:
+            out["state"] = "running"
+        return out
 
     def _get_reddit_bot(self, account: Dict):
         """Get or create a Reddit bot for an account."""
@@ -678,15 +706,21 @@ class Orchestrator:
         force=True: manual Scan Now — allowed while paused (discovery-only;
         act/engage still respect pause). Still blocked by real resource limits.
         """
+        if self._scan_running:
+            logger.info("Scan already in progress, skipping")
+            return
+
         reason = self._scan_blocked_reason(force=force)
         if reason == "paused":
             logger.info(
                 "Scan skipped: bot is paused "
                 "(Press Scan Now is OK while paused; scheduled scans stay off)"
             )
+            self._set_scan_status("skipped", "Paused — scheduled scans are off")
             return
         if reason == "resources":
             logger.info("Scan skipped: resources too low")
+            self._set_scan_status("skipped", "Resources too low")
             return
 
         # Run scan in a thread with hard timeout
@@ -694,13 +728,20 @@ class Orchestrator:
             future = pool.submit(self._scan_all, force)
             try:
                 future.result(timeout=SCAN_TIMEOUT_SECONDS)
+                # `_scan_all` owns completed/skipped. Do not flip "running"
+                # to completed here — a no-op return (already running) would
+                # mark the *other* in-flight scan as done.
             except concurrent.futures.TimeoutError:
                 logger.warning(
                     f"Scan ABORTED: exceeded {SCAN_TIMEOUT_SECONDS}s timeout"
                 )
+                self._set_scan_status(
+                    "failed", f"Timed out after {SCAN_TIMEOUT_SECONDS}s"
+                )
                 future.cancel()
             except Exception as e:
                 logger.error(f"Scan error: {e}")
+                self._set_scan_status("failed", str(e) or "Scan error")
 
     def _act_on_best_safe(self):
         """Wrapper: run _act_on_best with a hard timeout."""
@@ -730,21 +771,36 @@ class Orchestrator:
         - Resource check between each subreddit
         - Overall timeout enforced by _scan_all_safe()
         """
-        if self._scan_running:
-            logger.info("Scan already in progress, skipping")
-            return
         if self._paused and not force:
             logger.debug("Bot is paused, skipping scan")
+            self._set_scan_status("skipped", "Paused")
             return
         if not self.rate_limiter.is_active_hours() and not force:
             logger.debug("Outside active hours, skipping scan")
+            self._set_scan_status("skipped", "Outside active hours")
             return
         if self.rate_limiter.should_take_random_break() and not force:
             logger.info("Taking a random break (human simulation)")
+            self._set_scan_status("skipped", "Random break (human simulation)")
             return
-        self._scan_running = True
+        with self._state_lock:
+            if self._scan_running:
+                logger.info("Scan already in progress, skipping")
+                return
+            self._scan_running = True
+        self._set_scan_status("running", "Scanning…")
         try:
             self.__scan_all_inner(force=force)
+            with self._state_lock:
+                state = self._scan_status.get("state")
+            if state == "running":
+                pending = self.db.get_pending_opportunities(limit=100) or []
+                n = len(pending)
+                self._set_scan_status(
+                    "completed",
+                    f"{n} pending opportunit{'y' if n == 1 else 'ies'}",
+                    opportunities=n,
+                )
         finally:
             self._scan_running = False
 
@@ -758,6 +814,7 @@ class Orchestrator:
         throttle = self.resource_monitor.throttle_factor
         if throttle >= 5.0:
             logger.info("System resources critical, skipping scan")
+            self._set_scan_status("skipped", "Resources critical")
             return
 
         logger.info(
