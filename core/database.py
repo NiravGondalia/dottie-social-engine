@@ -841,17 +841,7 @@ class Database:
         status: str = "pending",
         metadata: Optional[Dict] = None,
     ) -> int:
-        """Log a discovered opportunity.
-
-        Human-skipped and approved rows are not revived — Clear queue
-        deletes pending so a new scan can refill from current config.
-        """
-        existing = self.get_opportunity(target_id)
-        if existing:
-            prev = existing.get("status") or ""
-            reason = (existing.get("rejection_reason") or "").lower()
-            if prev == "approved" or (prev == "skipped" and reason.startswith("human")):
-                return int(existing.get("id") or 0)
+        """Log a discovered opportunity."""
         cursor = self._execute_write(
             """INSERT OR REPLACE INTO opportunities
                (platform, target_id, title, subreddit_or_query,
@@ -955,19 +945,6 @@ class Database:
             return False
         self.update_opportunity_status(target_id, "skipped", rejection_reason=reason)
         return True
-
-    def clear_pending_opportunities(self, project: Optional[str] = None) -> int:
-        """Delete pending queue rows so the next scan can refill. Returns count."""
-        if project:
-            cursor = self._execute_write(
-                "DELETE FROM opportunities WHERE status = 'pending' AND project = ?",
-                (project,),
-            )
-        else:
-            cursor = self._execute_write(
-                "DELETE FROM opportunities WHERE status = 'pending'",
-            )
-        return cursor.rowcount if cursor.rowcount is not None else 0
 
     def approve_opportunity(self, target_id: str) -> bool:
         """Mark opportunity approved (HITL). Returns False if not found."""
