@@ -33,6 +33,20 @@ def test_list_signal_omits_reply():
     assert signal["why"] == "Public group hike this week"
 
 
+def test_zero_final_score_is_kept():
+    row = {
+        "target_id": "z",
+        "title": "t",
+        "subreddit_or_query": "toronto",
+        "score": 9,
+        "project": "dottie",
+        "status": "pending",
+        "metadata": {"final_score": 0},
+    }
+    signal = opportunity_to_signal(row)
+    assert signal["final_score"] == 0
+
+
 def test_include_reply_returns_draft():
     row = {
         "target_id": "abc123",

@@ -31,6 +31,7 @@ def opportunity_to_signal(
             if sub
             else f"https://redd.it/{tid}"
         )
+    final = meta.get("final_score")
     signal = {
         "target_id": tid,
         "title": row.get("title") or "",
@@ -40,7 +41,7 @@ def opportunity_to_signal(
         "status": row.get("status") or "",
         "score": row.get("score"),
         "dottie_score": meta.get("dottie_score"),
-        "final_score": meta.get("final_score") or row.get("score"),
+        "final_score": row.get("score") if final is None else final,
         "why": meta.get("why") or meta.get("summary") or "",
         "category": meta.get("category") or "",
         "urgency": meta.get("urgency") or "",
