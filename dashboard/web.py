@@ -30,6 +30,9 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from core.agent_service import AgentService
+from dashboard.agent_routes import register_agent_routes
+
 try:
     import bcrypt as _bcrypt
 except ImportError:
@@ -416,6 +419,10 @@ class WebDashboard:
 
         # Emergency stop
         self._emergency_stopped = False
+        self.agent_service = AgentService(
+            orchestrator,
+            emergency_stopped_fn=lambda: self._emergency_stopped,
+        )
 
         # Resource sampler for time-series
         self._resource_sampler = _ResourceSampler()
@@ -554,6 +561,7 @@ class WebDashboard:
 
     def _setup_routes(self):
         app = self.app
+        register_agent_routes(app, self.agent_service)
 
         # ── HTML entry points ──────────────────────────────
         @app.get("/")
