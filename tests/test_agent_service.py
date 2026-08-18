@@ -66,6 +66,15 @@ def test_revise_reply_uses_instruction(db, fake_orch):
     assert "long draft" in blob
 
 
+def test_get_scan_status_running_state_normalizes_running(fake_orch):
+    fake_orch._scan_status["state"] = "running"
+    fake_orch._scan_running = False
+    svc = AgentService(fake_orch, emergency_stopped_fn=lambda: False)
+    status = svc.get_scan_status()
+    assert status["state"] == "running"
+    assert status["running"] is True
+
+
 def test_scan_running_true_before_orchestrator_sets_flag(fake_orch):
     """scan() must not return state=running with running=False."""
     scan_started = threading.Event()

@@ -55,8 +55,6 @@ class AgentService:
         thread.start()
 
         scan = self._raw_scan_status()
-        if scan.get("state") == "running":
-            scan["running"] = True
         return {
             "ok": True,
             "already_running": False,
@@ -176,9 +174,13 @@ class AgentService:
     def _raw_scan_status(self) -> Dict[str, Any]:
         getter = getattr(self.orch, "get_scan_status", None)
         if callable(getter):
-            return dict(getter() or {})
-        status = getattr(self.orch, "_scan_status", None)
-        return dict(status) if isinstance(status, dict) else {}
+            scan = dict(getter() or {})
+        else:
+            status = getattr(self.orch, "_scan_status", None)
+            scan = dict(status) if isinstance(status, dict) else {}
+        if scan.get("state") == "running":
+            scan["running"] = True
+        return scan
 
     def _reserve_scan(self, job_id: str) -> tuple[bool, dict]:
         """Atomically inspect and reserve orchestrator scan state."""
