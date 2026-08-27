@@ -19,6 +19,9 @@ from typing import Optional, List, Dict, Tuple
 import yaml
 from openai import OpenAI
 
+from core.llm_cli import run_codex_exec
+from core.secrets import resolve_llm_api_key
+
 logger = logging.getLogger(__name__)
 
 # ── Task categories ──────────────────────────────────────────────
@@ -151,11 +154,18 @@ class LLMProvider:
         self._init_clients()
 
     def _init_clients(self):
-        """Initialize OpenAI client for each enabled provider."""
-        from core.secrets import resolve_llm_api_key
-
+        """Initialize HTTP and CLI LLM backends."""
         for name, cfg in self.config.get("providers", {}).items():
             if not cfg.get("enabled", False):
+                continue
+            if str(cfg.get("transport") or "").lower() == "cli":
+                self.provider_configs[name] = cfg
+                self._stats[name] = {
+                    "calls": 0, "tokens": 0, "errors": 0, "total_ms": 0,
+                }
+                logger.info(
+                    f"LLM provider ready: {name} (cli {cfg.get('command', ['codex'])})"
+                )
                 continue
             # API keys are env-only (never read from llm.yaml)
             api_key = resolve_llm_api_key(name)
@@ -184,14 +194,14 @@ class LLMProvider:
             except Exception as e:
                 logger.warning(f"Failed to initialize LLM provider '{name}': {e}")
 
-        if not self.clients:
+        if not self.provider_configs:
             logger.warning(
                 "No LLM providers configured. "
                 "Run 'python miloagent.py setup' to configure API keys."
             )
 
         # Log routing setup
-        available = set(self.clients.keys())
+        available = set(self.provider_configs.keys())
         creative_active = [p for p in self._creative_chain if p in available]
         analytical_active = [p for p in self._analytical_chain if p in available]
         logger.info(
@@ -265,6 +275,8 @@ class LLMProvider:
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
         task: str = "",
+        extra_body: Optional[Dict] = None,
+        response_format: Optional[Dict] = None,
     ) -> str:
         """Generate text using task-aware routing with fallback.
 
@@ -276,6 +288,8 @@ class LLMProvider:
             temperature: Sampling temperature.
             task: Task category — "creative" or "analytical".
                   If empty, uses the default fallback chain.
+            extra_body: Merged into the provider extra_body (e.g. Groq reasoning_effort).
+            response_format: Optional OpenAI-style format, e.g. {"type": "json_object"}.
 
         Returns the generated text string.
         Raises RuntimeError if all providers fail.
@@ -291,7 +305,7 @@ class LLMProvider:
         last_error = None
 
         for pname in chain:
-            if pname not in self.clients:
+            if pname not in self.provider_configs:
                 continue
 
             # Circuit-breaker check (quota exhaustion cooldown)
@@ -314,21 +328,56 @@ class LLMProvider:
 
             try:
                 cfg = self.provider_configs[pname]
+                t0 = time.time()
+                if str(cfg.get("transport") or "").lower() == "cli":
+                    use_schema = bool(
+                        response_format
+                        or task == TASK_ANALYTICAL
+                    )
+                    text = run_codex_exec(
+                        cfg,
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        use_json_schema=use_schema,
+                    )
+                    latency = (time.time() - t0) * 1000
+                    tok_count = max(len(text) // 4, 1)
+                    self._record_stat(pname, tok_count, latency)
+                    task_label = f" [{task}]" if task else ""
+                    logger.debug(
+                        f"LLM{task_label}: {len(text)} chars via {pname} "
+                        f"(cli) in {latency:.0f}ms"
+                    )
+                    return text
+
+                if pname not in self.clients:
+                    continue
+
                 messages = []
                 if system_prompt:
                     messages.append({"role": "system", "content": system_prompt})
                 messages.append({"role": "user", "content": prompt})
 
-                t0 = time.time()
+                create_kwargs = {
+                    "model": cfg["model"],
+                    "messages": messages,
+                    "max_tokens": max_tokens or cfg.get("max_tokens", 1024),
+                    "temperature": temperature or cfg.get("temperature", 0.7),
+                }
+                extra = dict(cfg.get("extra_body") or {})
+                if extra_body:
+                    extra.update(extra_body)
+                if extra:
+                    create_kwargs["extra_body"] = extra
+                if response_format:
+                    create_kwargs["response_format"] = response_format
                 response = self.clients[pname].chat.completions.create(
-                    model=cfg["model"],
-                    messages=messages,
-                    max_tokens=max_tokens or cfg.get("max_tokens", 1024),
-                    temperature=temperature or cfg.get("temperature", 0.7),
+                    **create_kwargs
                 )
                 latency = (time.time() - t0) * 1000
 
-                text = response.choices[0].message.content.strip()
+                content = response.choices[0].message.content or ""
+                text = content.strip()
                 tok_count = getattr(response.usage, "total_tokens", len(text) // 4)
 
                 # Record stats
@@ -512,10 +561,10 @@ class LLMProvider:
     ) -> Dict[str, bool]:
         """Test connectivity to each enabled provider."""
         results = {}
-        targets = [provider] if provider else list(self.clients.keys())
+        targets = [provider] if provider else list(self.provider_configs.keys())
 
         for pname in targets:
-            if pname not in self.clients:
+            if pname not in self.provider_configs:
                 results[pname] = False
                 continue
             try:
@@ -534,7 +583,7 @@ class LLMProvider:
 
     def get_available_providers(self) -> List[str]:
         """List names of configured (non-placeholder) providers."""
-        return list(self.clients.keys())
+        return list(self.provider_configs.keys())
 
     def shutdown(self):
         """Shutdown the thread pool."""

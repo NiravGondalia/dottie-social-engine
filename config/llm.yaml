@@ -1,35 +1,47 @@
 # =============================================================================
 # LLM Provider Configuration
 # =============================================================================
-# API keys are env-only — set in .env:
+# API keys are env-only — set in .env for HTTP backends:
 #   MILO_GROQ_API_KEY=...
 #   MILO_GEMINI_API_KEY=...
 #   MILO_ANTHROPIC_API_KEY=...
 #   MILO_OLLAMA_API_KEY=ollama   # optional; defaults to "ollama"
 #
-# COST: $0/month using Groq + Gemini free tiers
+# Codex CLI uses the logged-in `codex` binary (no Groq key).
 # =============================================================================
 
 providers:
-  groq:
+  codex:
     enabled: true
-    priority: 1
+    transport: cli
+    command: ["codex", "exec"]
+    # Empty model = Codex CLI default from ~/.codex/config.toml
+    model: ""
+    timeout: 180
+    sandbox: read-only
+    output_schema: config/codex_keepers.schema.json
+
+  groq:
+    enabled: false
+    priority: 2
     base_url: "https://api.groq.com/openai/v1"
-    model: "llama-3.3-70b-versatile"        # Free tier: 30 req/min, 6000 req/day
+    model: "qwen/qwen3.6-27b"
     max_tokens: 1024
     temperature: 0.7
+    extra_body:
+      reasoning_effort: none
 
   gemini:
-    enabled: true
-    priority: 2
+    enabled: false
+    priority: 3
     base_url: "https://generativelanguage.googleapis.com/v1beta/openai/"
-    model: "gemini-2.0-flash"               # Free tier: 15 req/min, 1500 req/day
+    model: "gemini-2.0-flash"
     max_tokens: 1024
     temperature: 0.7
 
   ollama:
-    enabled: false                          # Enable if you have Ollama running locally
-    priority: 3
+    enabled: false
+    priority: 4
     base_url: "http://localhost:11434/v1"
     model: "llama3.2:3b"
     max_tokens: 1024
@@ -37,14 +49,14 @@ providers:
 
   claude:
     enabled: false
-    priority: 4
+    priority: 5
     base_url: "https://api.anthropic.com/v1"
     model: "claude-sonnet-4-5-20250929"
     max_tokens: 1024
     temperature: 0.7
 
-fallback_chain: ["groq", "gemini", "ollama"]
+fallback_chain: ["codex"]
 
 routing:
-  creative: ["groq", "gemini", "ollama"]
-  analytical: ["ollama", "groq", "gemini"]
+  creative: ["codex"]
+  analytical: ["codex"]

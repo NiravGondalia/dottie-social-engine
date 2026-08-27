@@ -9,6 +9,32 @@ from typing import Any, Callable, Dict, List, Optional
 from core.agent_signals import opportunity_to_signal, parse_metadata
 
 
+def _reply_post_body(signal: dict, metadata: dict) -> str:
+    """Prefer real post text over an empty discovery summary."""
+    chunks = []
+    for key in ("summary", "meetup_description", "why"):
+        val = str(metadata.get(key) or "").strip()
+        if val and val not in chunks:
+            chunks.append(val)
+    if not chunks:
+        chunks.append(str(signal.get("title") or "").strip())
+    return "\n".join(chunks)
+
+
+def _dottie_meetup_context(signal: dict, metadata: dict) -> Optional[dict]:
+    discovery = str(metadata.get("discovery") or "").lower()
+    project = str(signal.get("project") or "").lower()
+    if discovery != "dottie_llm" and project != "dottie":
+        return None
+    return {
+        "why": metadata.get("why") or "",
+        "meetup_title": metadata.get("meetup_title") or "",
+        "activity_type": metadata.get("activity_type") or "",
+        "urgency": metadata.get("urgency") or "",
+        "url": metadata.get("url") or signal.get("url") or "",
+    }
+
+
 class AgentService:
     """Coordinate scans, opportunity reads, and human-reviewed reply drafts."""
 
@@ -97,17 +123,15 @@ class AgentService:
 
         signal = opportunity_to_signal(row, include_reply=True)
         metadata = parse_metadata(row.get("metadata"))
-        post_body = (
-            metadata.get("summary")
-            or metadata.get("meetup_description")
-            or signal["title"]
-        )
+        post_body = _reply_post_body(signal, metadata)
+        meetup_context = _dottie_meetup_context(signal, metadata)
         try:
             text = self.orch.content_gen.generate_reddit_comment(
                 post_title=signal["title"],
                 post_body=post_body,
                 subreddit=signal["subreddit"],
                 project=self._project_dict(signal["project"]),
+                meetup_context=meetup_context,
             )
             self.orch.db.merge_opportunity_metadata(
                 target_id,
@@ -143,7 +167,9 @@ class AgentService:
 
         system = (
             "You rewrite a Reddit comment. Apply the human instruction. "
-            "Return ONLY the new comment text, no quotes or preamble."
+            "Return ONLY the new comment text, no quotes or preamble. "
+            "If this is a public hang/meetup thread, keep the voice of someone "
+            "who might show up — not advice to the organizer."
         )
         user = f"Instruction:\n{instruction}\n\nCurrent comment:\n{draft}"
         try:

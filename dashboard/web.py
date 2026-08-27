@@ -1,4 +1,4 @@
-"""FastAPI web dashboard V2 for MiloAgent — full TUI parity + CRUD + auth."""
+"""FastAPI web dashboard for Dottie Social Engine — full TUI parity + CRUD + auth."""
 
 import asyncio
 import gc
@@ -258,6 +258,16 @@ class ProjectUpdate(BaseModel):
     reddit_subreddits_primary: Optional[list] = None
     reddit_subreddits_secondary: Optional[list] = None
     reddit_keywords: Optional[list] = None
+    reddit_exclude_keywords: Optional[list] = None
+    reddit_comment_style: Optional[str] = None
+    reddit_min_post_score: Optional[int] = None
+    reddit_max_post_age_hours: Optional[int] = None
+    discovery_enabled: Optional[bool] = None
+    discovery_min_score: Optional[int] = None
+    discovery_max_candidates: Optional[int] = None
+    discovery_max_results: Optional[int] = None
+    discovery_thinking: Optional[bool] = None
+    discovery_max_tokens: Optional[int] = None
     twitter_keywords: Optional[list] = None
     twitter_hashtags: Optional[list] = None
     tone_style: Optional[str] = None
@@ -354,7 +364,7 @@ class WebDashboard:
 
     def __init__(self, orchestrator):
         self.orch = orchestrator
-        self.app = FastAPI(title="MiloAgent", docs_url=None, redoc_url=None)
+        self.app = FastAPI(title="Dottie Social Engine", docs_url=None, redoc_url=None)
 
         # CORS: restrict to known origins (configurable via env)
         cors_env = os.environ.get("MILO_CORS_ORIGINS", "")
@@ -587,7 +597,7 @@ class WebDashboard:
             from fastapi.responses import PlainTextResponse
             return PlainTextResponse(
                 "User-agent: *\nAllow: /\nDisallow: /api/\n"
-                "Sitemap: https://github.com/SoCloseSociety/MiloAgent\n"
+                "Sitemap: https://dottie.app\n"
             )
 
         # ── GET /health (no auth — for Docker healthcheck) ─
@@ -621,6 +631,13 @@ class WebDashboard:
             for p in getattr(self.orch, "projects", []):
                 proj = p.get("project", {})
                 projects.append({"name": proj.get("name", ""), "enabled": proj.get("enabled", True)})
+            scan = {}
+            getter = getattr(self.orch, "get_scan_status", None)
+            if callable(getter):
+                try:
+                    scan = getter() or {}
+                except Exception:
+                    scan = {}
             return {
                 "paused": paused,
                 "mode": mode,
@@ -628,6 +645,7 @@ class WebDashboard:
                 "projects": projects,
                 "version": self.orch.settings.get("bot", {}).get("version", "?"),
                 "emergency_stopped": self._emergency_stopped,
+                "scan": scan,
             }
 
         # ── GET /api/stats ─────────────────────────────────
@@ -657,9 +675,15 @@ class WebDashboard:
 
         # ── GET /api/actions ───────────────────────────────
         @app.get("/api/actions")
-        async def get_actions(limit: int = Query(30, le=200), _=Depends(self._verify_token)):
+        async def get_actions(
+            limit: int = Query(30, le=200),
+            platform: Optional[str] = Query(None),
+            _=Depends(self._verify_token),
+        ):
             try:
-                rows = self.orch.db.get_recent_actions(hours=24, limit=limit)
+                rows = self.orch.db.get_recent_actions(
+                    hours=24, limit=limit, platform=platform
+                )
                 return [dict(r) for r in (rows or [])]
             except Exception as e:
                 return {"error": str(e)}
@@ -736,9 +760,19 @@ class WebDashboard:
         @app.get("/api/projects/{name}")
         async def get_project_detail(name: str, _=Depends(self._verify_token)):
             proj = self.orch.business_mgr.get_project(name)
-            if not proj:
-                raise HTTPException(status_code=404, detail="Project not found")
-            return proj
+            if proj:
+                return proj
+            # Disabled projects are omitted from the live list — still load from disk.
+            import yaml
+            for f in self.orch.business_mgr.projects_dir.glob("*.yaml"):
+                try:
+                    with open(f) as fh:
+                        data = yaml.safe_load(fh) or {}
+                except Exception:
+                    continue
+                if data.get("project", {}).get("name", "").lower() == name.lower():
+                    return data
+            raise HTTPException(status_code=404, detail="Project not found")
 
         # ── POST /api/projects ─────────────────────────────
         @app.post("/api/projects")
@@ -795,6 +829,27 @@ class WebDashboard:
                         subs["secondary"] = body.reddit_subreddits_secondary
                     if body.reddit_keywords is not None:
                         reddit["keywords"] = body.reddit_keywords
+                    if body.reddit_exclude_keywords is not None:
+                        reddit["exclude_keywords"] = body.reddit_exclude_keywords
+                    if body.reddit_comment_style is not None:
+                        reddit["comment_style"] = body.reddit_comment_style
+                    if body.reddit_min_post_score is not None:
+                        reddit["min_post_score"] = body.reddit_min_post_score
+                    if body.reddit_max_post_age_hours is not None:
+                        reddit["max_post_age_hours"] = body.reddit_max_post_age_hours
+                    disc = data.setdefault("opportunity_discovery", {})
+                    if body.discovery_enabled is not None:
+                        disc["enabled"] = body.discovery_enabled
+                    if body.discovery_min_score is not None:
+                        disc["min_dottie_score"] = body.discovery_min_score
+                    if body.discovery_max_candidates is not None:
+                        disc["max_candidates"] = body.discovery_max_candidates
+                    if body.discovery_max_results is not None:
+                        disc["max_results"] = body.discovery_max_results
+                    if body.discovery_thinking is not None:
+                        disc["thinking"] = body.discovery_thinking
+                    if body.discovery_max_tokens is not None:
+                        disc["max_tokens"] = body.discovery_max_tokens
                     # Twitter config
                     twitter = data.setdefault("twitter", {})
                     if body.twitter_keywords is not None:
@@ -957,7 +1012,7 @@ class WebDashboard:
                     "https://www.reddit.com/api/v1/access_token",
                     headers={
                         "Authorization": f"Basic {credentials}",
-                        "User-Agent": "MiloAgent/1.0 by MiloBot",
+                        "User-Agent": "DottieSocialEngine/1.0",
                         "Content-Type": "application/x-www-form-urlencoded",
                     },
                     data={
@@ -1009,11 +1064,11 @@ class WebDashboard:
             # Return a simple success page (browser-friendly)
             from fastapi.responses import HTMLResponse
             html = f"""<!DOCTYPE html>
-<html><head><title>Reddit OAuth -- MiloAgent</title>
+<html><head><title>Reddit OAuth — Dottie Social Engine</title>
 <style>body{{font-family:sans-serif;text-align:center;padding:60px;background:#1a1a2e;color:#e0e0e0}}
 h1{{color:#ff6b35}}p{{color:#a0a0c0}}</style></head>
 <body><h1>Authorized!</h1>
-<p>Reddit account <strong>{username}</strong> successfully linked to MiloAgent.</p>
+<p>Reddit account <strong>{username}</strong> successfully linked to Dottie Social Engine.</p>
 <p>refresh_token saved. You can close this tab.</p>
 </body></html>"""
             return HTMLResponse(content=html)
@@ -1136,6 +1191,23 @@ h1{{color:#ff6b35}}p{{color:#a0a0c0}}</style></head>
                 return enriched
             except Exception as e:
                 return {"error": str(e)}
+
+        # ── POST /api/opportunities/clear ────────────────────
+        @app.post("/api/opportunities/clear")
+        async def clear_opportunities(_=Depends(self._verify_token)):
+            """Wipe pending HITL items. Next scan refills from current config."""
+            try:
+                n = self.orch.db.clear_pending_opportunities()
+                self.orch.db.log_decision(
+                    "hitl_clear_queue",
+                    "reddit",
+                    "Dottie",
+                    details=f"cleared {n} pending",
+                    outcome="cleared",
+                )
+                return {"ok": True, "cleared": n}
+            except Exception as e:
+                return {"ok": False, "error": str(e)}
 
         # ── GET /api/opportunities/rejected ──────────────────
         @app.get("/api/opportunities/rejected")
@@ -1784,12 +1856,35 @@ h1{{color:#ff6b35}}p{{color:#a0a0c0}}</style></head>
         async def control_scan(_=Depends(self._verify_token)):
             if self._emergency_stopped:
                 return {"ok": False, "error": "Emergency stop active — click Reset first"}
+            getter = getattr(self.orch, "get_scan_status", None)
+            current = getter() if callable(getter) else {}
+            if current.get("running") or getattr(self.orch, "_scan_running", False):
+                return {
+                    "ok": True,
+                    "already_running": True,
+                    "message": "Scan already in progress",
+                    "scan": current,
+                }
             # force=True: discovery while paused (no auto-post); act still blocked
             threading.Thread(
                 target=lambda: self.orch._scan_all_safe(force=True),
                 daemon=True,
             ).start()
-            return {"ok": True, "message": "Scan started (works while paused)"}
+            if callable(getter):
+                current = getter() or {}
+            if not current.get("running"):
+                current = {
+                    **current,
+                    "state": "running",
+                    "running": True,
+                    "message": current.get("message") or "Scanning…",
+                }
+            return {
+                "ok": True,
+                "already_running": False,
+                "message": "Scan started (works while paused)",
+                "scan": current,
+            }
 
         @app.post("/api/control/learn")
         async def control_learn(_=Depends(self._verify_token)):
@@ -2110,7 +2205,7 @@ h1{{color:#ff6b35}}p{{color:#a0a0c0}}</style></head>
                 return StreamingResponse(
                     iter([output.getvalue()]),
                     media_type="text/csv",
-                    headers={"Content-Disposition": f"attachment; filename=milo_actions_{hours}h.csv"},
+                    headers={"Content-Disposition": f"attachment; filename=dottie_actions_{hours}h.csv"},
                 )
             except Exception as e:
                 raise HTTPException(status_code=500, detail=str(e))
@@ -2146,7 +2241,7 @@ h1{{color:#ff6b35}}p{{color:#a0a0c0}}</style></head>
                 return StreamingResponse(
                     iter([output.getvalue()]),
                     media_type="text/csv",
-                    headers={"Content-Disposition": f"attachment; filename=milo_opportunities_{status}.csv"},
+                    headers={"Content-Disposition": f"attachment; filename=dottie_opportunities_{status}.csv"},
                 )
             except Exception as e:
                 raise HTTPException(status_code=500, detail=str(e))

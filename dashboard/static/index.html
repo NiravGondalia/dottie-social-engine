@@ -3,11 +3,11 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>MiloAgent — AI Growth Agent Mission Control</title>
-<meta name="description" content="MiloAgent is an autonomous AI growth agent for Reddit, Twitter/X and Telegram.">
+<title>Dottie Social Engine</title>
+<meta name="description" content="Dottie Social Engine — operator dashboard for community growth on Reddit and beyond.">
 <meta name="robots" content="index, follow">
-<link rel="icon" type="image/png" href="/static/miloagent.png">
-<link rel="apple-touch-icon" href="/static/miloagent.png">
+<link rel="icon" type="image/png" href="/static/dottie-logo.png">
+<link rel="apple-touch-icon" href="/static/dottie-logo.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="/static/cyber.css">
@@ -21,9 +21,9 @@
 <!-- ═══════════════════ LOGIN ═══════════════════ -->
 <div id="loginPage" class="login-page">
   <div class="login-box">
-    <img src="/static/miloagent.png" alt="MiloAgent" style="width:80px;height:80px;margin-bottom:16px;border-radius:50%;border:2px solid var(--border);box-shadow:0 0 40px rgba(249,168,212,.08)">
-    <div class="logo">MILOAGENT</div>
-    <div class="logo-sub">Mission Control</div>
+    <img src="/static/dottie-logo.png" alt="Dottie Social Engine" class="login-brand-mark">
+    <div class="logo">Dottie Social Engine</div>
+    <div class="logo-sub">Operator dashboard</div>
     <div class="field">
       <input id="loginUser" type="text" placeholder="Username" autocomplete="username">
     </div>
@@ -39,14 +39,14 @@
 <!-- ═══════════════════ DASHBOARD ═══════════════════ -->
 <div id="dashboardPage" class="dashboard">
 
-  <!-- Mission Control Header -->
+  <!-- Brand header -->
   <div class="mc-header">
     <div class="mc-left">
       <button class="hamburger" onclick="toggleMobileMenu()" aria-label="Menu">
         <span></span><span></span><span></span>
       </button>
-      <img src="/static/miloagent.png" alt="" style="width:28px;height:28px;border-radius:50%">
-      <span class="mc-logo">MILOAGENT</span>
+      <img src="/static/dottie-logo.png" alt="" class="mc-brand-mark">
+      <span class="mc-logo">Dottie Social Engine</span>
       <span class="mc-badge" id="mcVersion">v6.0</span>
       <span class="mc-badge" id="mcMode">server</span>
     </div>
@@ -56,9 +56,144 @@
         <span id="statusText">Connecting...</span>
       </div>
       <span class="mc-uptime" id="uptime"></span>
+      <button class="btn btn-sm" id="btnEngineRoom" onclick="showEngine()">Engine room</button>
+      <button class="btn btn-sm" id="btnBackHome" onclick="showHome()" style="display:none">Back to home</button>
       <button class="btn btn-sm" onclick="logout()">Logout</button>
     </div>
   </div>
+
+  <!-- Emergency Banner (global — visible on home and Engine room) -->
+  <div id="emergencyBanner" class="emergency-banner">
+    <span>EMERGENCY STOP ACTIVE -- All operations frozen</span>
+    <button class="btn btn-sm success" onclick="emergencyReset()">Reset</button>
+  </div>
+
+  <nav id="operatorNav" class="operator-nav" aria-label="Operator">
+    <button type="button" class="op-tab active" id="opTabHome" onclick="showHome()">Home</button>
+    <button type="button" class="op-tab" id="opTabDottie" onclick="showDottieConfig()">Dottie <span class="op-dirty" id="dottieDirty" hidden>●</span></button>
+  </nav>
+
+  <!-- ═══════ DAILY CANVAS (default home) ═══════ -->
+  <div id="homeCanvas" class="home-canvas">
+    <div class="home-pulse" id="homePulse">
+      <div class="pulse-left">
+        <span class="pulse-orb status-orb stopped" id="pulseOrb"></span>
+        <span class="pulse-state" id="pulseState">Connecting...</span>
+        <span class="pulse-sep" aria-hidden="true"></span>
+        <span class="pulse-scan" id="pulseScan">Scan idle</span>
+        <span class="pulse-sep" aria-hidden="true"></span>
+        <span class="pulse-errors" id="pulseErrors">Errors 0</span>
+      </div>
+      <div class="pulse-actions">
+        <button class="btn btn-sm primary" id="homeBtnScan" onclick="startHomeScan()">Scan</button>
+        <button class="btn btn-sm success" id="homeBtnResume" onclick="doControl('resume')" disabled>Resume</button>
+        <button class="btn btn-sm danger" id="homeBtnPause" onclick="doControl('pause')">Pause</button>
+      </div>
+    </div>
+    <div class="home-body">
+      <section class="home-queue">
+        <div class="home-queue-head">
+          <h2>Needs you <span class="badge-count" id="homeOppCount">0</span></h2>
+          <button class="btn btn-sm" id="homeBtnClearQueue" onclick="clearHomeQueue()" disabled>Clear queue</button>
+        </div>
+        <div id="homeOpps" class="hitl-list"></div>
+      </section>
+      <aside class="home-outcomes">
+        <section class="home-queued">
+          <h2>Queued for Dottie <span class="badge-count" id="homeDottieCount">0</span></h2>
+          <div id="homeDottieQueue" class="home-queued-list"></div>
+        </section>
+        <h2>Posted today</h2>
+        <div class="home-outcome-counts" id="homeOutcomeCounts"></div>
+        <div id="homeOutcomes" class="home-outcome-list"></div>
+      </aside>
+    </div>
+  </div>
+
+  <!-- ═══════ DOTTIE CONFIG (draft → Apply writes dottie.yaml) ═══════ -->
+  <div id="dottieConfig" class="dottie-config" style="display:none">
+    <div class="cfg-head">
+      <div>
+        <h2>Dottie radar</h2>
+        <p class="cfg-note">Edits stay in this tab until you Apply. Apply writes <code>projects/dottie.yaml</code>; the next scan uses it. YAML comments in that file will be rewritten.</p>
+      </div>
+      <div class="cfg-actions">
+        <span class="cfg-status" id="cfgStatus"></span>
+        <button class="btn btn-sm" id="cfgDiscard" onclick="discardDottieDraft()" disabled>Discard</button>
+        <button class="btn btn-sm primary" id="cfgApply" onclick="applyDottieDraft()" disabled>Apply</button>
+      </div>
+    </div>
+    <form id="dottieCfgForm" class="cfg-form" onsubmit="return false">
+      <section class="cfg-block">
+        <h3>Project</h3>
+        <label class="hitl-check"><input type="checkbox" id="cfgEnabled"> Enabled</label>
+        <label class="hitl-label">Tagline</label>
+        <input class="form-input" id="cfgTagline" />
+        <label class="hitl-label">Description</label>
+        <textarea class="form-input" id="cfgDescription" rows="3"></textarea>
+      </section>
+      <section class="cfg-block">
+        <h3>Subreddits</h3>
+        <label class="hitl-label">Primary (one per line)</label>
+        <textarea class="form-input cfg-list" id="cfgSubsPrimary" rows="6"></textarea>
+        <label class="hitl-label">Secondary (one per line)</label>
+        <textarea class="form-input cfg-list" id="cfgSubsSecondary" rows="4"></textarea>
+      </section>
+      <section class="cfg-block">
+        <h3>Keywords</h3>
+        <label class="hitl-label">Include (one per line)</label>
+        <textarea class="form-input cfg-list" id="cfgKeywords" rows="8"></textarea>
+        <label class="hitl-label">Exclude (one per line)</label>
+        <textarea class="form-input cfg-list" id="cfgExclude" rows="10"></textarea>
+      </section>
+      <section class="cfg-block">
+        <h3>Discovery + tone</h3>
+        <label class="hitl-check"><input type="checkbox" id="cfgDiscEnabled"> LLM opportunity filter</label>
+        <label class="hitl-check"><input type="checkbox" id="cfgDiscThinking"> Model thinking</label>
+        <p class="cfg-warn" id="cfgThinkingWarn" hidden>
+          Thinking makes Groq reason before the keeper list. That uses more tokens and can empty the digest if the budget is too low.
+          <span id="cfgThinkingWarnExtra" hidden> Raise max tokens to at least 2500 — Apply will set that for you.</span>
+        </p>
+        <div class="cfg-row">
+          <div>
+            <label class="hitl-label">Min Dottie score</label>
+            <input class="form-input" id="cfgMinScore" type="number" min="0" max="12" step="1" />
+          </div>
+          <div>
+            <label class="hitl-label">Max candidates</label>
+            <input class="form-input" id="cfgMaxCand" type="number" min="1" max="100" step="1" />
+          </div>
+          <div>
+            <label class="hitl-label">Max results</label>
+            <input class="form-input" id="cfgMaxResults" type="number" min="1" max="50" step="1" />
+          </div>
+        </div>
+        <div class="cfg-row">
+          <div>
+            <label class="hitl-label">Max tokens</label>
+            <input class="form-input" id="cfgMaxTokens" type="number" min="256" max="8000" step="1" />
+          </div>
+          <div>
+            <label class="hitl-label">Min post score</label>
+            <input class="form-input" id="cfgMinPost" type="number" min="0" step="1" />
+          </div>
+          <div>
+            <label class="hitl-label">Max post age (hours)</label>
+            <input class="form-input" id="cfgMaxAge" type="number" min="1" step="1" />
+          </div>
+        </div>
+        <div class="cfg-row">
+          <div>
+            <label class="hitl-label">Tone / comment style</label>
+            <input class="form-input" id="cfgTone" placeholder="helpful_casual" />
+          </div>
+        </div>
+      </section>
+    </form>
+  </div>
+
+  <!-- ═══════ ENGINE ROOM (existing 5-tab Mission Control) ═══════ -->
+  <div id="engineRoom" class="engine-room" style="display:none">
 
   <!-- Live Metrics Ribbon -->
   <div class="metrics-ribbon" id="metricsRibbon">
@@ -96,12 +231,6 @@
     <span class="gsb-sep">|</span>
     <span class="gsb-item">RAM <span class="gsb-val" id="gsbRAM">-</span></span>
     <span class="gsb-spinner" id="gsbSpinner" style="display:none"></span>
-  </div>
-
-  <!-- Emergency Banner -->
-  <div id="emergencyBanner" class="emergency-banner">
-    <span>EMERGENCY STOP ACTIVE -- All operations frozen</span>
-    <button class="btn btn-sm success" onclick="emergencyReset()">Reset</button>
   </div>
 
   <!-- ═══════ TAB 1: MISSION CONTROL ═══════ -->
@@ -234,7 +363,7 @@
         </div>
         <div class="card glow-orange">
           <h2>Top Opportunities <span style="font-size:11px;font-weight:400;color:var(--text3)">HITL</span></h2>
-          <div id="oppsList" class="feed" style="max-height:520px;overflow-y:auto"></div>
+          <div id="oppsList" class="feed hitl-list" style="max-height:520px;overflow-y:auto"></div>
         </div>
         <div class="card glow-cyan">
           <h2>Dottie Queue <button class="btn btn-xs" style="float:right;margin-top:-2px" onclick="exportDottieActivities()">Export JSON</button></h2>
@@ -381,6 +510,8 @@
     </div>
   </div>
 
+  </div><!-- /engineRoom -->
+
 </div>
 
 <!-- ═══════ MODALS ═══════ -->
@@ -496,6 +627,6 @@
 <!-- Toast Container -->
 <div id="toastContainer" class="toast-container"></div>
 
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=clear2"></script>
 </body>
 </html>

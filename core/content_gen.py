@@ -466,6 +466,61 @@ class ContentGenerator:
             f"without mentioning it."
         )
 
+    def _dottie_meetup_instruction(self, ctx: Dict) -> str:
+        """Tell the model to sound like a local who might show up."""
+        lines = [
+            "This is a public in-person hang/meetup thread, not a how-to or product question.",
+        ]
+        title = str(ctx.get("meetup_title") or "").strip()
+        why = str(ctx.get("why") or "").strip()
+        activity = str(ctx.get("activity_type") or "").strip()
+        urgency = str(ctx.get("urgency") or "").strip()
+        if title:
+            lines.append(f"Hang angle: {title}.")
+        if activity:
+            lines.append(f"Activity: {activity}.")
+        if urgency:
+            lines.append(f"When: {urgency}.")
+        if why:
+            lines.append(f"Why it fits: {why}.")
+        lines.extend(
+            [
+                "Write as a Toronto local who might actually show up. 1-3 sentences on the hang itself.",
+                "Ask at most one practical question (time, what to bring, which film).",
+                "Do NOT coach the organizer on how to improve their listing.",
+                "Do NOT tell them to add the movie title, RSVP details, or similar host advice.",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _dottie_cta_url(self, project: Dict) -> str:
+        proj = project.get("project", project) if isinstance(project, dict) else {}
+        url = str((proj or {}).get("url") or "https://dottie.app").strip()
+        if "dottie.app" not in url.lower():
+            return "https://dottie.app"
+        return url.rstrip("/")
+
+    def _dottie_cta_instruction(self, project: Dict) -> str:
+        url = self._dottie_cta_url(project)
+        return (
+            f"After the hang comment, add ONE closing sentence that mentions Dottie "
+            f"and includes this exact URL: {url}\n"
+            "Dottie is for real plans in your city: discover what's on, see who's going, "
+            "and meet through the activity — not dating, not a guest list.\n"
+            "Hang reaction first. Dottie line last, under 25 words. One link only.\n"
+            "Do not say download, swipe, dating, or paste more than one URL."
+        )
+
+    def _dottie_cta_facts(self, project: Dict) -> str:
+        url = self._dottie_cta_url(project)
+        return (
+            "Product: Dottie\n"
+            f"URL: {url}\n"
+            "Site pitch: social plans worth showing up for. "
+            "Meet through the plan, not awkward small talk. "
+            "Community-first, curated, not a dating app."
+        )
+
     def _get_tone_instruction(self, style: str) -> str:
         """Pick a random tone variation for the given style."""
         variations = self.TONE_VARIATIONS.get(
@@ -487,6 +542,7 @@ class ContentGenerator:
         failure_rules: Optional[str] = None,
         account: Optional[Dict] = None,
         thread_comments: list = None,
+        meetup_context: Optional[Dict] = None,
     ) -> str:
         """Generate a Reddit comment for a given post."""
         if is_promotional is None:
@@ -501,8 +557,15 @@ class ContentGenerator:
         )
 
         # Detect post type for targeted response
-        post_type = self._detect_post_type(post_title, post_body)
-        post_type_instruction = self._get_post_type_instruction(post_type)
+        meetup_instruction = ""
+        if meetup_context:
+            meetup_instruction = self._dottie_meetup_instruction(meetup_context)
+            post_type_instruction = ""
+            promo_instruction = self._dottie_cta_instruction(project)
+            business_context = self._dottie_cta_facts(project)
+        else:
+            post_type = self._detect_post_type(post_title, post_body)
+            post_type_instruction = self._get_post_type_instruction(post_type)
 
         # Get subreddit-specific persona — keep it even for organic
         persona = self._get_subreddit_persona(subreddit)
@@ -542,6 +605,7 @@ class ContentGenerator:
                 "Write a helpful Reddit comment for a post in r/{subreddit}.\n"
                 "Title: {post_title}\n"
                 "Content: {post_body}\n"
+                "{meetup_instruction}\n"
                 "{post_type_instruction}\n"
                 "{promotional_instruction}\n"
                 "{business_context}"
@@ -553,6 +617,7 @@ class ContentGenerator:
             post_body=post_body[:500],
             promotional_instruction=promo_instruction,
             business_context=business_context,
+            meetup_instruction=meetup_instruction,
             post_type_instruction=post_type_instruction,
             subreddit_persona=persona["persona"],
             research_context=research_context,

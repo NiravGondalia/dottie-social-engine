@@ -36,6 +36,37 @@ def test_generate_reply_persists_draft(db, fake_orch):
     assert result["reply_draft"] == "generated comment"
     got = svc.get_opportunity("tid1", include_reply=True)
     assert got["reply_draft"] == "generated comment"
+    kwargs = fake_orch.content_gen.generate_reddit_comment.call_args.kwargs
+    assert kwargs["meetup_context"] is not None
+    assert kwargs["post_body"] == "looking for hikers"
+
+
+def test_generate_reply_dottie_passes_hang_context(db, fake_orch):
+    db.log_opportunity(
+        "reddit",
+        "1vr85w8",
+        "Cozy Cinema Social #3 -August 29 at 8:30 pm (in-person; Leslieville)",
+        "TorontoEvents",
+        9.4,
+        "dottie",
+        metadata={
+            "discovery": "dottie_llm",
+            "why": "Small public coffee-shop cinema social",
+            "meetup_title": "Cozy Cinema Social",
+            "activity_type": "cinema",
+            "urgency": "This Month",
+            "summary": "",
+            "url": "https://www.reddit.com/r/TorontoEvents/comments/1vr85w8/",
+        },
+    )
+    svc = AgentService(fake_orch, emergency_stopped_fn=lambda: False)
+    result = svc.generate_reply("1vr85w8")
+    assert result["ok"] is True
+    kwargs = fake_orch.content_gen.generate_reddit_comment.call_args.kwargs
+    ctx = kwargs["meetup_context"]
+    assert ctx["meetup_title"] == "Cozy Cinema Social"
+    assert "cinema social" in ctx["why"]
+    assert kwargs["post_body"] == "Small public coffee-shop cinema social"
 
 
 def test_generate_reply_missing(fake_orch):

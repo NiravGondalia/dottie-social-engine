@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["keepers"],
+  "properties": {
+    "keepers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "target_id",
+          "dottie_score",
+          "social_potential",
+          "recurring_potential",
+          "community_growth",
+          "final_score",
+          "activity_type",
+          "why",
+          "meetup_title",
+          "urgency"
+        ],
+        "properties": {
+          "target_id": { "type": "string" },
+          "dottie_score": { "type": "number" },
+          "social_potential": { "type": "number" },
+          "recurring_potential": { "type": "number" },
+          "community_growth": { "type": "number" },
+          "final_score": { "type": "number" },
+          "activity_type": { "type": "string" },
+          "why": { "type": "string" },
+          "meetup_title": { "type": "string" },
+          "urgency": { "type": "string" }
+        }
+      }
+    }
+  }
+}

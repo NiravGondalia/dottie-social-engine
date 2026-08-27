@@ -1,11 +1,16 @@
 'use strict';
 // ══════════════════════════════════════════════════════════════
-// MiloAgent Mission Control v5.0 — Dashboard Engine (Cosmic Dark)
+// Dottie Social Engine — Dashboard Engine (Cosmic Dark)
 // ══════════════════════════════════════════════════════════════
 
-let TOKEN = localStorage.getItem('milo_token') || '';
+let TOKEN = localStorage.getItem('dottie_token') || localStorage.getItem('milo_token') || '';
 let paused = false;
 let currentTab = 'command';
+let currentSurface = 'home'; // 'home' | 'dottie' | 'engine'
+const DOTTIE_PROJECT = 'Dottie';
+let _dottieDirty = false;
+let _dottieSaved = null;
+let _dottieFormBound = false;
 let charts = {};
 let ws = null;
 let refreshTimer = null;
@@ -192,15 +197,89 @@ async function doLogin() {
   try {
     const r = await fetch('/api/auth/login', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username:user,password:pass}) });
     const data = await r.json();
-    if (r.ok && data.ok) { TOKEN=data.token; localStorage.setItem('milo_token',TOKEN); loginAttempts=0; showDashboard(); }
+    if (r.ok && data.ok) { TOKEN=data.token; localStorage.setItem('dottie_token',TOKEN); localStorage.removeItem('milo_token'); loginAttempts=0; showDashboard(); }
     else { loginAttempts++; if(loginAttempts>=5){loginLockUntil=Date.now()+30000;errEl.textContent='Too many attempts. Locked 30s'}else errEl.textContent=data.detail||'Invalid credentials'; }
   } catch(e) { errEl.textContent = 'Connection failed'; }
   btn.disabled = false; btn.textContent = 'LAUNCH CONTROL';
 }
 
-function showDashboard() { document.getElementById('loginPage').style.display='none'; document.getElementById('dashboardPage').style.display='block'; startDashboard(); }
+function showDashboard() {
+  document.getElementById('loginPage').style.display='none';
+  document.getElementById('dashboardPage').style.display='block';
+  const hash = (location.hash || '').replace(/^#/, '');
+  currentSurface = (hash === 'engine' || hash === 'dottie') ? hash : 'home';
+  applySurface();
+  setSurfaceHash(currentSurface);
+  startDashboard();
+  if (currentSurface === 'dottie') loadDottieConfig();
+}
 function showLogin() { document.getElementById('loginPage').style.display='flex'; document.getElementById('dashboardPage').style.display='none'; document.getElementById('loginError').textContent=''; }
-function logout() { TOKEN=''; localStorage.removeItem('milo_token'); if(ws){ws.close();ws=null} if(refreshTimer){clearInterval(refreshTimer);refreshTimer=null} charts={}; showLogin(); }
+function logout() { TOKEN=''; localStorage.removeItem('dottie_token'); localStorage.removeItem('milo_token'); if(ws){ws.close();ws=null} if(refreshTimer){clearInterval(refreshTimer);refreshTimer=null} charts={}; showLogin(); }
+
+function setSurfaceHash(name) {
+  if (location.hash === '#' + name) return;
+  history.replaceState(null, '', '#' + name);
+}
+
+function applySurface() {
+  const isHome = currentSurface === 'home';
+  const isDottie = currentSurface === 'dottie';
+  const isEngine = currentSurface === 'engine';
+  const home = document.getElementById('homeCanvas');
+  const dottie = document.getElementById('dottieConfig');
+  const engine = document.getElementById('engineRoom');
+  const opNav = document.getElementById('operatorNav');
+  const btnEngine = document.getElementById('btnEngineRoom');
+  const btnHome = document.getElementById('btnBackHome');
+  if (home) home.style.display = isHome ? '' : 'none';
+  if (dottie) dottie.style.display = isDottie ? '' : 'none';
+  if (engine) engine.style.display = isEngine ? '' : 'none';
+  if (opNav) opNav.style.display = isEngine ? 'none' : '';
+  if (btnEngine) btnEngine.style.display = isEngine ? 'none' : '';
+  if (btnHome) btnHome.style.display = isEngine ? '' : 'none';
+  const tabHome = document.getElementById('opTabHome');
+  const tabDottie = document.getElementById('opTabDottie');
+  if (tabHome) tabHome.classList.toggle('active', isHome);
+  if (tabDottie) tabDottie.classList.toggle('active', isDottie);
+  document.body.classList.toggle('surface-home', isHome);
+  document.body.classList.toggle('surface-dottie', isDottie);
+  document.body.classList.toggle('surface-engine', isEngine);
+}
+
+function _leaveDottieOk() {
+  if (currentSurface !== 'dottie' || !_dottieDirty) return true;
+  return confirm('Dottie config has unapplied edits. Leave without Apply?');
+}
+
+function showHome() {
+  if (!_leaveDottieOk()) return;
+  _hitlCaptureDrafts();
+  currentSurface = 'home';
+  applySurface();
+  setSurfaceHash('home');
+  refresh();
+}
+
+function showDottieConfig() {
+  currentSurface = 'dottie';
+  applySurface();
+  setSurfaceHash('dottie');
+  loadDottieConfig();
+}
+
+function showEngine(tab) {
+  if (!_leaveDottieOk()) return;
+  _hitlCaptureDrafts();
+  currentSurface = 'engine';
+  applySurface();
+  setSurfaceHash('engine');
+  if (tab) {
+    currentTab = tab;
+    document.querySelectorAll('.nav-tab').forEach(t => t.classList.toggle('active', t.dataset.tab===tab));
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.toggle('active', c.id==='tab-'+tab));
+  }
+  refresh();
+}
 
 document.addEventListener('DOMContentLoaded', () => {
   const passEl = document.getElementById('loginPass');
@@ -209,10 +288,30 @@ document.addEventListener('DOMContentLoaded', () => {
   if (userEl) userEl.addEventListener('keydown', e => { if(e.key==='Enter') document.getElementById('loginPass').focus(); });
 });
 
+window.addEventListener('hashchange', () => {
+  if (!TOKEN) return;
+  const dash = document.getElementById('dashboardPage');
+  if (!dash || dash.style.display === 'none') return;
+  const h = (location.hash || '').replace(/^#/, '');
+  const prev = currentSurface;
+  if (h === 'engine') {
+    if (currentSurface !== 'engine') showEngine();
+  } else if (h === 'dottie') {
+    if (currentSurface !== 'dottie') showDottieConfig();
+  } else if (currentSurface !== 'home') {
+    showHome();
+  }
+  if (currentSurface === prev && (h || 'home') !== prev) setSurfaceHash(prev);
+});
+
 // ══════════════════════════════════════════════════════════════
 // TAB NAVIGATION + HAMBURGER
 // ══════════════════════════════════════════════════════════════
 function switchTab(name) {
+  if (currentSurface !== 'engine') {
+    showEngine(name);
+    return;
+  }
   currentTab = name;
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.toggle('active', t.dataset.tab===name));
   document.querySelectorAll('.tab-content').forEach(c => c.classList.toggle('active', c.id==='tab-'+name));
@@ -404,16 +503,325 @@ function renderStatus(d) {
   if (mcMode) mcMode.textContent = d.mode||'auto';
   if (uptime) uptime.textContent = fmtUp(d.uptime_seconds);
   if (mcVer) mcVer.textContent = 'v'+(d.version||'4.0');
-  const btnPause = document.getElementById('btnPause');
-  const btnResume = document.getElementById('btnResume');
-  if (btnPause) btnPause.disabled = paused;
-  if (btnResume) btnResume.disabled = !paused;
+  const emergency = !!d.emergency_stopped;
+  document.querySelectorAll('#btnPause, #homeBtnPause').forEach(b => { b.disabled = paused || emergency; });
+  document.querySelectorAll('#btnResume, #homeBtnResume').forEach(b => { b.disabled = !paused || emergency; });
   const eb = document.getElementById('emergencyBanner');
-  if (eb) eb.classList.toggle('show', !!d.emergency_stopped);
+  if (eb) eb.classList.toggle('show', emergency);
   const btnEmergency = document.getElementById('btnEmergency');
-  if (btnEmergency) btnEmergency.disabled = !!d.emergency_stopped;
+  if (btnEmergency) btnEmergency.disabled = emergency;
   // Update global status bar
-  updateGlobalStatusBar({ emergency: !!d.emergency_stopped, paused: paused });
+  updateGlobalStatusBar({ emergency: emergency, paused: paused });
+  updatePulseErrors();
+  if (d.scan) applyScanStatus(d.scan);
+}
+
+// ══════════════════════════════════════════════════════════════
+// HOME CANVAS: PULSE + POSTED TODAY
+// ══════════════════════════════════════════════════════════════
+function updatePulseErrors() {
+  const el = document.getElementById('pulseErrors');
+  if (!el) return;
+  el.textContent = 'Errors ' + _errCount;
+  el.classList.toggle('has-errors', _errCount > 0);
+}
+
+let _scanStatusLocal = null;
+let _scanStartedAt = 0;
+
+function _scanJobFromSchedule(schedule) {
+  const jobs = schedule || [];
+  return jobs.find(j => /(^|_)scan_all$|_scan_all/i.test(j.name || ''))
+    || jobs.find(j => /scan/i.test(j.name || '') && !/takeover/i.test(j.name || ''))
+    || null;
+}
+
+function _agoFromIso(iso) {
+  if (!iso) return '';
+  const t = Date.parse(iso);
+  if (!t) return '';
+  const secs = Math.max(0, Math.round((Date.now() - t) / 1000));
+  return fmtCD(secs) + ' ago';
+}
+
+function applyScanStatus(scan, schedule) {
+  scan = scan || {};
+  const hasApi = scan.running != null || (scan.state && scan.state !== 'idle');
+  if (!hasApi && _scanStatusLocal && (_scanStatusLocal.running || _scanStatusLocal.state === 'running')) {
+    scan = _scanStatusLocal;
+  } else if (hasApi) {
+    _scanStatusLocal = scan;
+  }
+  const apiRunning = !!scan.running || scan.state === 'running';
+  const finishedAt = scan.finished_at ? Date.parse(scan.finished_at) : 0;
+  const finishedAfterStart = _scanStartedAt && finishedAt && finishedAt >= (_scanStartedAt - 2000);
+  if (_scanStartedAt && !apiRunning) {
+    if (scan.state === 'failed' || scan.state === 'skipped' || (scan.state === 'completed' && finishedAfterStart)) {
+      _scanStartedAt = 0;
+    } else if (Date.now() - _scanStartedAt < 120000) {
+      scan = { state: 'running', running: true, message: scan.message || 'Scanning…' };
+    } else {
+      _scanStartedAt = 0;
+    }
+  }
+  const scanEl = document.getElementById('pulseScan');
+  const btn = document.getElementById('homeBtnScan');
+  const running = !!scan.running || scan.state === 'running';
+  const state = running ? 'running' : (scan.state || 'idle');
+  let text = 'Scan idle';
+  if (state === 'running') {
+    text = scan.message || 'Scanning…';
+  } else if (state === 'completed') {
+    const ago = _agoFromIso(scan.finished_at);
+    text = 'Scan completed' + (scan.message ? ' · ' + scan.message : '') + (ago ? ' · ' + ago : '');
+  } else if (state === 'failed') {
+    const ago = _agoFromIso(scan.finished_at);
+    text = 'Scan failed' + (scan.message ? ' — ' + scan.message : '') + (ago ? ' · ' + ago : '');
+  } else if (state === 'skipped') {
+    text = 'Scan skipped' + (scan.message ? ' — ' + scan.message : '');
+  } else {
+    const scanJob = _scanJobFromSchedule(schedule);
+    if (scanJob && scanJob.seconds_until >= 0) {
+      text = 'Next scan in ' + fmtCD(scanJob.seconds_until);
+    } else if (_lastScanTime) {
+      const ago = Math.max(0, Math.round((Date.now() - _lastScanTime.getTime()) / 1000));
+      text = 'Last scan ' + fmtCD(ago) + ' ago';
+    }
+  }
+  if (state !== 'running') {
+    const scanJob = _scanJobFromSchedule(schedule);
+    if (scanJob && scanJob.seconds_until >= 0 && state !== 'idle') {
+      text += ' · next in ' + fmtCD(scanJob.seconds_until);
+    }
+  }
+  if (scanEl) {
+    scanEl.textContent = text;
+    scanEl.className = 'pulse-scan is-' + state;
+  }
+  if (btn) {
+    btn.disabled = running;
+    btn.textContent = running ? 'Scanning…' : 'Scan';
+  }
+}
+
+function renderHomePulse(status, schedule) {
+  status = status || {};
+  const emergency = !!status.emergency_stopped;
+  const isPaused = !!status.paused;
+  const orb = document.getElementById('pulseOrb');
+  const state = document.getElementById('pulseState');
+  if (orb) orb.className = 'pulse-orb status-orb ' + (emergency ? 'stopped' : isPaused ? 'paused' : 'live');
+  if (state) {
+    state.textContent = emergency ? 'Emergency' : isPaused ? 'Paused' : 'Alive';
+    state.className = 'pulse-state ' + (emergency ? 'is-stop' : isPaused ? 'is-paused' : 'is-live');
+  }
+  applyScanStatus(status.scan, schedule);
+  updatePulseErrors();
+  const scanBtn = document.getElementById('homeBtnScan');
+  if (scanBtn && emergency) scanBtn.disabled = true;
+  document.querySelectorAll('#homeBtnPause').forEach(b => { b.disabled = isPaused || emergency; });
+  document.querySelectorAll('#homeBtnResume').forEach(b => { b.disabled = !isPaused || emergency; });
+}
+
+async function startHomeScan() {
+  const btn = document.getElementById('homeBtnScan');
+  if (btn) { btn.disabled = true; btn.textContent = 'Scanning…'; }
+  _scanStartedAt = Date.now();
+  applyScanStatus({ state: 'running', running: true, message: 'Scanning…' });
+  try {
+    const d = await apiPost('/api/control/scan');
+    if (!d || !d.ok) {
+      const err = (d && (d.error || d.message)) || 'Scan failed to start';
+      toast(err, 'error');
+      applyScanStatus({ state: 'failed', running: false, message: err, finished_at: new Date().toISOString() });
+      if (btn) { btn.disabled = false; btn.textContent = 'Scan'; }
+      return;
+    }
+    if (d.scan) applyScanStatus(d.scan);
+    toast(d.already_running ? 'Scan already running' : 'Scan started', d.already_running ? 'info' : 'success');
+    refresh();
+  } catch (e) {
+    toast(e.message, 'error');
+    applyScanStatus({ state: 'failed', running: false, message: e.message, finished_at: new Date().toISOString() });
+    if (btn) { btn.disabled = false; btn.textContent = 'Scan'; }
+  }
+}
+
+function _parseActionMeta(a) {
+  let meta = a && a.metadata;
+  if (!meta) return {};
+  if (typeof meta === 'string') {
+    try { return JSON.parse(meta) || {}; } catch (e) { return {}; }
+  }
+  return typeof meta === 'object' ? meta : {};
+}
+
+function _actionSubreddit(a) {
+  if (!a) return '';
+  if (a.subreddit) return a.subreddit;
+  if (a.subreddit_or_query) return a.subreddit_or_query;
+  const meta = _parseActionMeta(a);
+  return meta.subreddit || meta.subreddit_or_query || '';
+}
+
+function _isFailedOrRemoved(a) {
+  if (!a) return false;
+  if (a.success === 0 || a.success === false) return true;
+  const t = (a.action_type || '').toLowerCase();
+  if (t === 'remove' || t === 'delete' || t === 'removed') return true;
+  const err = (a.error_message || '').toLowerCase();
+  if (err.includes('removed') || err.includes('deleted')) return true;
+  const meta = _parseActionMeta(a);
+  return !!(meta.removed || meta.was_removed);
+}
+
+function renderHomeOutcomes(d) {
+  const countsEl = document.getElementById('homeOutcomeCounts');
+  const listEl = document.getElementById('homeOutcomes');
+  if (!countsEl && !listEl) return;
+  if (!d || d.error || !Array.isArray(d)) {
+    if (countsEl) countsEl.innerHTML = '';
+    if (listEl) listEl.innerHTML = '<p class="no-data">Nothing posted yet today</p>';
+    return;
+  }
+  const reddit = d.filter(a => (a.platform || '').toLowerCase() === 'reddit');
+  let comments = 0, replies = 0, failed = 0;
+  reddit.forEach(a => {
+    if (_isFailedOrRemoved(a)) { failed++; return; }
+    const t = (a.action_type || '').toLowerCase();
+    if (t === 'comment') comments++;
+    else if (t === 'reply') replies++;
+  });
+  if (countsEl) {
+    countsEl.innerHTML =
+      `<div class="oc"><b>${comments}</b><span>Comments</span></div>` +
+      `<div class="oc"><b>${replies}</b><span>Replies</span></div>` +
+      `<div class="oc${failed ? ' fail' : ''}"><b>${failed}</b><span>Removed / failed</span></div>`;
+  }
+  if (!listEl) return;
+  if (!reddit.length) {
+    listEl.innerHTML = '<p class="no-data">Nothing posted yet today</p>';
+    return;
+  }
+  const groups = {};
+  reddit.forEach(a => {
+    const sub = _actionSubreddit(a) || (a.target || a.target_id || 'unknown');
+    if (!groups[sub]) groups[sub] = [];
+    groups[sub].push(a);
+  });
+  const names = Object.keys(groups).sort((a, b) => groups[b].length - groups[a].length);
+  listEl.innerHTML = names.map(sub => {
+    const rows = groups[sub].slice(0, 8).map(a => {
+      const t = a.created_at || a.timestamp || '';
+      const time = t ? String(t).split(/[T ]/).pop().substring(0, 5) : '';
+      const type = a.action_type || '?';
+      const bad = _isFailedOrRemoved(a);
+      return `<div class="home-outcome-row${bad ? ' is-fail' : ''}">` +
+        `<span class="type">${esc(type)}</span>` +
+        `<span class="msg">${esc(a.account || '')}</span>` +
+        `<span class="time">${esc(time)}</span>` +
+        `</div>`;
+    }).join('');
+    const label = sub.startsWith('r/') || sub === 'unknown' ? sub : 'r/' + sub;
+    return `<div class="home-outcome-group"><div class="home-outcome-sub">${esc(label)} · ${groups[sub].length}</div>${rows}</div>`;
+  }).join('');
+}
+
+const _homeQueued = {};
+let _homeDottieFp = '';
+
+function renderHomeDottieQueue(d) {
+  const el = document.getElementById('homeDottieQueue');
+  const countEl = document.getElementById('homeDottieCount');
+  if (!el) return;
+  const rows = Array.isArray(d) ? d.filter(a => (a.status || 'queued') === 'queued') : [];
+  if (countEl) countEl.textContent = rows.length;
+  if (!rows.length) {
+    _homeDottieFp = '';
+    Object.keys(_homeQueued).forEach(k => delete _homeQueued[k]);
+    el.innerHTML = '<p class="no-data">Nothing queued — approve an opportunity</p>';
+    return;
+  }
+  const fp = rows.map(a => [
+    a.id || '',
+    a.status || '',
+    a.meetup_title || '',
+    a.reddit_posted ? '1' : '0',
+    a.reddit_url || '',
+    a.reply_text || '',
+  ].join('\t')).join('\n');
+  rows.forEach(a => {
+    const id = String(a.id || '');
+    _homeQueued[id] = a;
+    if (!_dottieById[id]) _dottieById[id] = a;
+  });
+  if (fp === _homeDottieFp && el.querySelector('.dottie-card')) {
+    _applyDottieOpenState(el);
+    return;
+  }
+  _dottieCaptureReplies();
+  _homeDottieFp = fp;
+  el.innerHTML = rows.map(_dottieCardHtml).join('');
+  _applyDottieOpenState(el);
+}
+
+function _dottieCardHtml(a) {
+  const id = String(a.id || '');
+  const st = a.status || 'queued';
+  const posted = a.reddit_posted ? ' · Reddit posted' : '';
+  const title = a.meetup_title || a.source_title || a.opportunity_target_id || 'Untitled';
+  const sub = a.subreddit ? 'r/' + a.subreddit : '';
+  const reply = a.reply_text || '';
+  const desc = a.meetup_description || '';
+  const why = a.why || '';
+  const url = a.reddit_url || '';
+  const open = _dottieExpanded.has(id);
+  const preview = reply ? esc(reply.substring(0, 140)) + (reply.length > 140 ? '…' : '') : '';
+  const urlHtml = url
+    ? `<a href="${esc(url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="color:inherit;text-decoration:underline;text-underline-offset:2px">${esc(sub || 'Reddit')} &#8599;</a>`
+    : esc(sub);
+  return `<div class="hitl-card dottie-card" data-aid="${esc(id)}">
+    <div class="hitl-head" onclick="toggleDottieCard('${esc(id)}')">
+      <span class="type" style="color:var(--accent)">${esc(st)}</span>
+      <span class="msg" style="flex:1"><strong>${esc(title)}</strong> ${urlHtml}${posted}</span>
+      <span class="hitl-chevron">${open ? '&#9650;' : '&#9660;'}</span>
+    </div>
+    ${why ? `<div class="hitl-why" onclick="toggleDottieCard('${esc(id)}')">${esc(String(why).substring(0, 200))}</div>` : ''}
+    ${(!open && preview) ? `<div class="hitl-why dottie-preview" onclick="toggleDottieCard('${esc(id)}')">${preview}</div>` : ''}
+    <div class="hitl-body" style="display:${open ? 'block' : 'none'}">
+      <label class="hitl-label">Meetup title</label>
+      <div class="dottie-field">${esc(title) || '—'}</div>
+      <label class="hitl-label">Meetup description</label>
+      <div class="dottie-field">${esc(desc) || '—'}</div>
+      <label class="hitl-label">Reply text</label>
+      <textarea class="form-input hitl-input" data-dottie-reply="${esc(id)}" rows="4">${esc(reply)}</textarea>
+      <div class="hitl-actions">
+        <button class="btn btn-sm" onclick="copyDottieReply('${esc(id)}')">Copy reply</button>
+        <button class="btn btn-sm" onclick="copyDottieAll('${esc(id)}')">Copy all</button>
+        ${url ? `<a class="btn btn-sm" href="${esc(url)}" target="_blank" rel="noopener">Open Reddit</a>` : ''}
+      </div>
+    </div>
+  </div>`;
+}
+
+function _applyDottieOpenState(root) {
+  if (!root) return;
+  root.querySelectorAll('.dottie-card[data-aid]').forEach(card => {
+    const id = card.getAttribute('data-aid');
+    const open = _dottieExpanded.has(id);
+    const body = card.querySelector('.hitl-body');
+    const chev = card.querySelector('.hitl-chevron');
+    const preview = card.querySelector('.dottie-preview');
+    if (body) body.style.display = open ? 'block' : 'none';
+    if (chev) chev.innerHTML = open ? '&#9650;' : '&#9660;';
+    if (preview) preview.style.display = open ? 'none' : '';
+  });
+}
+
+function _dottieReplyTa(id) {
+  const pref = currentSurface === 'home' ? '#homeDottieQueue' : '#dottieQueue';
+  return document.querySelector(pref + ' textarea[data-dottie-reply="' + CSS.escape(id) + '"]')
+    || document.querySelector('textarea[data-dottie-reply="' + CSS.escape(id) + '"]');
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -810,26 +1218,45 @@ function _hitlOppsFingerprint(list) {
   ].join('\t')).join('\n');
 }
 
+function _preferredHitlList() {
+  if (currentSurface === 'home') return document.getElementById('homeOpps');
+  return document.getElementById('oppsList');
+}
+
+function _hitlCardEl(tid) {
+  const pref = _preferredHitlList();
+  if (pref) {
+    const c = pref.querySelector('.hitl-card[data-tid="'+CSS.escape(tid)+'"]');
+    if (c) return c;
+  }
+  return document.querySelector('.hitl-list .hitl-card[data-tid="'+CSS.escape(tid)+'"]');
+}
+
 function _hitlCaptureDrafts() {
-  document.querySelectorAll('#oppsList .hitl-card[data-tid]').forEach(card => {
-    const tid = card.getAttribute('data-tid');
-    if (!tid) return;
-    const title = card.querySelector('[data-hitl="title"]');
-    const desc = card.querySelector('[data-hitl="desc"]');
-    const reply = card.querySelector('[data-hitl="reply"]');
-    const post = card.querySelector('[data-hitl="post"]');
-    if (!title && !desc && !reply) return;
-    _hitlDrafts[tid] = {
-      title: title ? title.value : '',
-      desc: desc ? desc.value : '',
-      reply: reply ? reply.value : '',
-      post: !!(post && post.checked),
-    };
+  const lists = [...document.querySelectorAll('.hitl-list')];
+  const pref = _preferredHitlList();
+  lists.sort((a, b) => (a === pref ? 1 : 0) - (b === pref ? 1 : 0));
+  lists.forEach(list => {
+    list.querySelectorAll('.hitl-card[data-tid]').forEach(card => {
+      const tid = card.getAttribute('data-tid');
+      if (!tid) return;
+      const title = card.querySelector('[data-hitl="title"]');
+      const desc = card.querySelector('[data-hitl="desc"]');
+      const reply = card.querySelector('[data-hitl="reply"]');
+      const post = card.querySelector('[data-hitl="post"]');
+      if (!title && !desc && !reply) return;
+      _hitlDrafts[tid] = {
+        title: title ? title.value : '',
+        desc: desc ? desc.value : '',
+        reply: reply ? reply.value : '',
+        post: !!(post && post.checked),
+      };
+    });
   });
 }
 
 function _hitlApplyOpenState() {
-  document.querySelectorAll('#oppsList .hitl-card[data-tid]').forEach(card => {
+  document.querySelectorAll('.hitl-list .hitl-card[data-tid]').forEach(card => {
     const tid = card.getAttribute('data-tid');
     const body = card.querySelector('.hitl-body');
     const chev = card.querySelector('.hitl-chevron');
@@ -850,24 +1277,148 @@ function _hitlApplyOpenState() {
   });
 }
 
+function _hitlEmptyHtml(msg) {
+  return `<p class="no-data">${msg}</p>`;
+}
+
+function _hitlCardHtml(o) {
+  const sc = o.score||o.final_score||o.relevance_score||0;
+  const c = sc>=7?'var(--green)':sc>=4?'var(--yellow)':'var(--text3)';
+  const sub = o.subreddit||o.subreddit_or_query||'';
+  const tid = o.target_id||'';
+  const meetup = o.meetup_title || '';
+  const dottie = o.dottie_score != null ? o.dottie_score : null;
+  const why = o.why || '';
+  const title = (meetup || o.title || o.content || '').substring(0,80);
+  const href = o.url || ((o.platform==='reddit' && tid)
+    ? (sub
+        ? `https://www.reddit.com/r/${encodeURIComponent(sub)}/comments/${encodeURIComponent(tid)}/`
+        : `https://redd.it/${encodeURIComponent(tid)}`)
+    : '');
+  const badge = dottie != null
+    ? `<span style="color:var(--accent);font-size:11px;margin-left:6px">Dottie ${esc(String(dottie))}/12</span>`
+    : '';
+  const titleHtml = href
+    ? `<a href="${href}" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="color:inherit;text-decoration:underline;text-underline-offset:2px">${esc(sub)} — ${esc(title)} &#8599;</a>${badge}`
+    : `${esc(sub)} — ${esc(title)}${badge}`;
+  const whyHtml = why
+    ? `<div class="hitl-why" onclick="toggleHitlCard('${esc(tid).replace(/'/g, '&#39;')}')">${esc(String(why).substring(0,200))}</div>`
+    : '';
+  const mt = o.meetup_title || '';
+  const md = o.meetup_description || '';
+  const reply = o.reply_draft || '';
+  const safeId = encodeURIComponent(tid);
+  const attr = (s) => esc(s).replace(/"/g,'&quot;');
+  const tidAttr = esc(tid).replace(/'/g, '&#39;');
+  return `<div class="hitl-card" data-tid="${esc(tid)}">
+    <div class="hitl-head" onclick="toggleHitlCard('${tidAttr}')">
+      <span style="color:${c};font-family:var(--font-data);font-weight:700;min-width:32px;font-size:13px">${Number(sc).toFixed(1)}</span>
+      <span class="type" style="color:var(--orange)">${esc(o.platform||'')}</span>
+      <span class="msg" style="flex:1">${titleHtml}</span>
+      <span class="hitl-chevron">&#9660;</span>
+    </div>
+    ${whyHtml}
+    <div class="hitl-body" style="display:none">
+      <label class="hitl-label">Meetup title</label>
+      <input class="form-input hitl-input" data-hitl="title" value="${attr(mt)}" />
+      <label class="hitl-label">Meetup description</label>
+      <textarea class="form-input hitl-input" data-hitl="desc" rows="2">${esc(md)}</textarea>
+      <label class="hitl-label">Reply text</label>
+      <textarea class="form-input hitl-input" data-hitl="reply" rows="3">${esc(reply)}</textarea>
+      <label class="hitl-check"><input type="checkbox" data-hitl="post" /> Also post to Reddit</label>
+      <div class="hitl-actions">
+        <button class="btn btn-sm danger" onclick="skipOpportunity('${safeId}')">Skip</button>
+        <button class="btn btn-sm" onclick="copyHitlReply('${tidAttr}')">Copy reply</button>
+        <button class="btn btn-sm" style="background:var(--green);color:#000" onclick="approveOpportunity('${safeId}')">Approve</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function _setHomeOppCount(n) {
+  const el = document.getElementById('homeOppCount');
+  if (el) el.textContent = n;
+  const btn = document.getElementById('homeBtnClearQueue');
+  if (btn) btn.disabled = !n;
+}
+
+async function _clearQueueViaSkip() {
+  const opps = await api('/api/opportunities?limit=100');
+  const list = Array.isArray(opps) ? opps : [];
+  let cleared = 0;
+  for (const o of list) {
+    const tid = o.target_id;
+    if (!tid) continue;
+    const s = await apiPost('/api/opportunities/' + encodeURIComponent(tid) + '/skip', {
+      reason: 'queue cleared',
+    });
+    if (s && s.ok) cleared++;
+  }
+  return cleared;
+}
+
+async function clearHomeQueue() {
+  const n = parseInt((document.getElementById('homeOppCount') || {}).textContent, 10) || 0;
+  if (!n) return;
+  if (!confirm('Clear ' + n + ' item' + (n === 1 ? '' : 's') + ' from Needs you? Next scan will refill from the current Dottie config.')) return;
+  const btn = document.getElementById('homeBtnClearQueue');
+  if (btn) btn.disabled = true;
+  try {
+    let cleared = 0;
+    const bulk = await apiPost('/api/opportunities/clear').catch(() => null);
+    if (bulk && bulk.ok) {
+      cleared = bulk.cleared || n;
+    } else {
+      cleared = await _clearQueueViaSkip();
+    }
+    if (!cleared) {
+      toast((bulk && (bulk.error || bulk.detail)) || 'Clear failed', 'error');
+      if (btn) btn.disabled = false;
+      return;
+    }
+    _hitlExpanded.clear();
+    Object.keys(_hitlDrafts).forEach(k => { delete _hitlDrafts[k]; });
+    _hitlFingerprint = '';
+    toast('Cleared ' + cleared + ' — scan to refill', 'success');
+    refresh();
+  } catch (e) {
+    toast(e.message, 'error');
+    if (btn) btn.disabled = false;
+  }
+}
+
 function renderOpps(d) {
-  const el = document.getElementById('oppsList');
-  if (!el) return;
+  const homeEl = document.getElementById('homeOpps');
+  const intelEl = document.getElementById('oppsList');
+  if (!homeEl && !intelEl) return;
+  const visibleEl = currentSurface === 'home' ? homeEl : intelEl;
+
   if (!d||d.error) {
     _hitlFingerprint = '';
-    el.innerHTML=`<p class="no-data">${d&&d.error?esc(d.error):'No pending opportunities'}</p>`;
+    const msg = _hitlEmptyHtml(d&&d.error?esc(d.error):'No pending opportunities');
+    if (homeEl) homeEl.innerHTML = msg;
+    if (intelEl) intelEl.innerHTML = msg;
+    _setHomeOppCount(0);
     return;
   }
   if (!d.length) {
     _hitlFingerprint = '';
     _hitlExpanded.clear();
-    el.innerHTML='<p class="no-data">No pending opportunities</p>';
+    const msg = _hitlEmptyHtml('No pending opportunities');
+    if (homeEl) homeEl.innerHTML = msg;
+    if (intelEl) intelEl.innerHTML = msg;
+    _setHomeOppCount(0);
     return;
   }
   const list = d.slice(0,25);
+  const redditList = list.filter(o => (o.platform || '').toLowerCase() === 'reddit');
   const fp = _hitlOppsFingerprint(list);
   // Same data: leave DOM alone so open cards / in-progress edits stay put
-  if (fp === _hitlFingerprint && el.querySelector('.hitl-card')) return;
+  if (fp === _hitlFingerprint && visibleEl && (visibleEl.querySelector('.hitl-card') || visibleEl.querySelector('.no-data'))) {
+    _hitlApplyOpenState();
+    _setHomeOppCount(redditList.length);
+    return;
+  }
   _hitlCaptureDrafts();
   _hitlFingerprint = fp;
   const liveIds = new Set(list.map(o => o.target_id || '').filter(Boolean));
@@ -877,79 +1428,33 @@ function renderOpps(d) {
   for (const tid of Object.keys(_hitlDrafts)) {
     if (!liveIds.has(tid)) delete _hitlDrafts[tid];
   }
-  el.innerHTML = list.map((o, idx) => {
-    const sc = o.score||o.final_score||o.relevance_score||0;
-    const c = sc>=7?'var(--green)':sc>=4?'var(--yellow)':'var(--text3)';
-    const sub = o.subreddit||o.subreddit_or_query||'';
-    const tid = o.target_id||'';
-    const meetup = o.meetup_title || '';
-    const dottie = o.dottie_score != null ? o.dottie_score : null;
-    const why = o.why || '';
-    const title = (meetup || o.title || o.content || '').substring(0,80);
-    const href = o.url || ((o.platform==='reddit' && tid)
-      ? (sub
-          ? `https://www.reddit.com/r/${encodeURIComponent(sub)}/comments/${encodeURIComponent(tid)}/`
-          : `https://redd.it/${encodeURIComponent(tid)}`)
-      : '');
-    const badge = dottie != null
-      ? `<span style="color:var(--accent);font-size:11px;margin-left:6px">Dottie ${esc(String(dottie))}/12</span>`
-      : '';
-    const titleHtml = href
-      ? `<a href="${href}" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="color:inherit;text-decoration:underline;text-underline-offset:2px">${esc(sub)} — ${esc(title)} &#8599;</a>${badge}`
-      : `${esc(sub)} — ${esc(title)}${badge}`;
-    const whyHtml = why
-      ? `<div class="hitl-why" onclick="toggleHitlCard('${esc(tid).replace(/'/g, '&#39;')}')">${esc(String(why).substring(0,200))}</div>`
-      : '';
-    const mt = o.meetup_title || '';
-    const md = o.meetup_description || '';
-    const reply = o.reply_draft || '';
-    const safeId = encodeURIComponent(tid);
-    const attr = (s) => esc(s).replace(/"/g,'&quot;');
-    const tidAttr = esc(tid).replace(/'/g, '&#39;');
-    return `<div class="hitl-card" data-tid="${esc(tid)}">
-      <div class="hitl-head" onclick="toggleHitlCard('${tidAttr}')">
-        <span style="color:${c};font-family:var(--font-data);font-weight:700;min-width:32px;font-size:13px">${Number(sc).toFixed(1)}</span>
-        <span class="type" style="color:var(--orange)">${esc(o.platform||'')}</span>
-        <span class="msg" style="flex:1">${titleHtml}</span>
-        <span class="hitl-chevron">&#9660;</span>
-      </div>
-      ${whyHtml}
-      <div class="hitl-body" style="display:none">
-        <label class="hitl-label">Meetup title</label>
-        <input class="form-input hitl-input" data-hitl="title" value="${attr(mt)}" />
-        <label class="hitl-label">Meetup description</label>
-        <textarea class="form-input hitl-input" data-hitl="desc" rows="2">${esc(md)}</textarea>
-        <label class="hitl-label">Reply text</label>
-        <textarea class="form-input hitl-input" data-hitl="reply" rows="3">${esc(reply)}</textarea>
-        <label class="hitl-check"><input type="checkbox" data-hitl="post" /> Also post to Reddit</label>
-        <div class="hitl-actions">
-          <button class="btn btn-sm danger" onclick="skipOpportunity('${safeId}')">Skip</button>
-          <button class="btn btn-sm" onclick="copyHitlReply('${tidAttr}')">Copy reply</button>
-          <button class="btn btn-sm" style="background:var(--green);color:#000" onclick="approveOpportunity('${safeId}')">Approve</button>
-        </div>
-      </div>
-    </div>`;
-  }).join('');
+  if (intelEl) intelEl.innerHTML = list.map(_hitlCardHtml).join('');
+  if (homeEl) {
+    homeEl.innerHTML = redditList.length
+      ? redditList.map(_hitlCardHtml).join('')
+      : _hitlEmptyHtml('No pending opportunities');
+  }
+  _setHomeOppCount(redditList.length);
   _hitlApplyOpenState();
 }
 
 function toggleHitlCard(tid) {
   if (!tid) return;
-  const card = document.querySelector('#oppsList .hitl-card[data-tid="'+CSS.escape(tid)+'"]');
-  if (!card) return;
-  const body = card.querySelector('.hitl-body');
-  const chev = card.querySelector('.hitl-chevron');
-  if (!body) return;
-  const open = body.style.display !== 'none';
-  if (open) _hitlExpanded.delete(tid);
+  const wasOpen = _hitlExpanded.has(tid);
+  if (wasOpen) _hitlExpanded.delete(tid);
   else _hitlExpanded.add(tid);
-  body.style.display = open ? 'none' : 'block';
-  if (chev) chev.innerHTML = open ? '&#9660;' : '&#9650;';
+  document.querySelectorAll('.hitl-list .hitl-card[data-tid="'+CSS.escape(tid)+'"]').forEach(card => {
+    const body = card.querySelector('.hitl-body');
+    const chev = card.querySelector('.hitl-chevron');
+    if (!body) return;
+    body.style.display = wasOpen ? 'none' : 'block';
+    if (chev) chev.innerHTML = wasOpen ? '&#9660;' : '&#9650;';
+  });
   _hitlCaptureDrafts();
 }
 
 function _hitlCardFields(tid) {
-  const card = document.querySelector('#oppsList .hitl-card[data-tid="'+CSS.escape(tid)+'"]');
+  const card = _hitlCardEl(tid);
   if (!card) return { reply: '', meetup_title: '', meetup_description: '', post_to_reddit: false };
   return {
     reply: (card.querySelector('[data-hitl="reply"]') || {}).value || '',
@@ -966,7 +1471,10 @@ async function copyHitlReply(tid) {
     await navigator.clipboard.writeText(text);
     toast('Reply copied','success');
   } catch(e) {
-    const ta = document.querySelector('#oppsList .hitl-card[data-tid="'+CSS.escape(tid)+'"] [data-hitl="reply"]');
+    const ta = (() => {
+      const card = _hitlCardEl(tid);
+      return card ? card.querySelector('[data-hitl="reply"]') : null;
+    })();
     if (ta) { ta.select(); document.execCommand('copy'); }
     toast('Reply copied','success');
   }
@@ -1059,41 +1567,7 @@ function renderDottieQueue(d) {
     const id = String(a.id || '');
     liveIds.add(id);
     _dottieById[id] = a;
-    const st = a.status||'queued';
-    const posted = a.reddit_posted ? ' · Reddit posted' : '';
-    const title = a.meetup_title || a.source_title || a.opportunity_target_id || '';
-    const sub = a.subreddit ? 'r/'+a.subreddit : '';
-    const reply = a.reply_text || '';
-    const desc = a.meetup_description || '';
-    const why = a.why || '';
-    const url = a.reddit_url || '';
-    const open = _dottieExpanded.has(id);
-    const preview = reply ? esc(reply.substring(0,140))+(reply.length>140?'…':'') : '';
-    const urlHtml = url
-      ? `<a href="${esc(url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="color:inherit;text-decoration:underline;text-underline-offset:2px">${esc(sub||'Reddit')} &#8599;</a>`
-      : esc(sub);
-    return `<div class="hitl-card dottie-card" data-aid="${esc(id)}">
-      <div class="hitl-head" onclick="toggleDottieCard('${esc(id)}')">
-        <span class="type" style="color:var(--accent)">${esc(st)}</span>
-        <span class="msg" style="flex:1"><strong>${esc(title)}</strong> ${urlHtml}${posted}</span>
-        <span class="hitl-chevron">${open ? '&#9650;' : '&#9660;'}</span>
-      </div>
-      ${why ? `<div class="hitl-why" onclick="toggleDottieCard('${esc(id)}')">${esc(String(why).substring(0,200))}</div>` : ''}
-      ${(!open && preview) ? `<div class="hitl-why" style="padding-top:0;opacity:.85" onclick="toggleDottieCard('${esc(id)}')">${preview}</div>` : ''}
-      <div class="hitl-body" style="display:${open ? 'block' : 'none'}">
-        <label class="hitl-label">Meetup title</label>
-        <div class="dottie-field">${esc(title)||'—'}</div>
-        <label class="hitl-label">Meetup description</label>
-        <div class="dottie-field">${esc(desc)||'—'}</div>
-        <label class="hitl-label">Reply text</label>
-        <textarea class="form-input hitl-input" data-dottie-reply="${esc(id)}" rows="4">${esc(reply)}</textarea>
-        <div class="hitl-actions">
-          <button class="btn btn-sm" onclick="copyDottieReply('${esc(id)}')">Copy reply</button>
-          <button class="btn btn-sm" onclick="copyDottieAll('${esc(id)}')">Copy all</button>
-          ${url ? `<a class="btn btn-sm" href="${esc(url)}" target="_blank" rel="noopener">Open Reddit</a>` : ''}
-        </div>
-      </div>
-    </div>`;
+    return _dottieCardHtml(a);
   }).join('');
   for (const id of [..._dottieExpanded]) {
     if (!liveIds.has(id)) _dottieExpanded.delete(id);
@@ -1116,18 +1590,24 @@ async function _copyText(text, okMsg) {
 }
 
 async function copyDottieReply(id) {
-  const a = _dottieById[id] || {};
-  const ta = document.querySelector('#dottieQueue textarea[data-dottie-reply="'+CSS.escape(id)+'"]');
+  const a = _dottieById[id] || _homeQueued[id] || {};
+  const ta = _dottieReplyTa(id);
   const text = (ta && ta.value) || a.reply_text || '';
-  if (ta && _dottieById[id]) _dottieById[id].reply_text = ta.value;
+  if (ta) {
+    if (_dottieById[id]) _dottieById[id].reply_text = ta.value;
+    if (_homeQueued[id]) _homeQueued[id].reply_text = ta.value;
+  }
   await _copyText(text, 'Reply copied');
 }
 
 async function copyDottieAll(id) {
-  const a = _dottieById[id] || {};
-  const ta = document.querySelector('#dottieQueue textarea[data-dottie-reply="'+CSS.escape(id)+'"]');
+  const a = _dottieById[id] || _homeQueued[id] || {};
+  const ta = _dottieReplyTa(id);
   const reply = (ta && ta.value) || a.reply_text || '';
-  if (ta && _dottieById[id]) _dottieById[id].reply_text = ta.value;
+  if (ta) {
+    if (_dottieById[id]) _dottieById[id].reply_text = ta.value;
+    if (_homeQueued[id]) _homeQueued[id].reply_text = ta.value;
+  }
   const parts = [
     a.meetup_title ? 'Title: '+a.meetup_title : '',
     a.meetup_description ? 'Description: '+a.meetup_description : '',
@@ -1139,19 +1619,28 @@ async function copyDottieAll(id) {
 }
 
 function _dottieCaptureReplies() {
-  document.querySelectorAll('#dottieQueue textarea[data-dottie-reply]').forEach(ta => {
+  document.querySelectorAll('textarea[data-dottie-reply]').forEach(ta => {
     const id = ta.getAttribute('data-dottie-reply');
-    if (id && _dottieById[id]) _dottieById[id].reply_text = ta.value;
+    if (!id) return;
+    if (_dottieById[id]) _dottieById[id].reply_text = ta.value;
+    if (_homeQueued[id]) _homeQueued[id].reply_text = ta.value;
   });
 }
 
 function toggleDottieCard(id) {
   if (!id) return;
   _dottieCaptureReplies();
-  if (_dottieExpanded.has(id)) _dottieExpanded.delete(id);
+  const wasOpen = _dottieExpanded.has(id);
+  if (wasOpen) _dottieExpanded.delete(id);
   else _dottieExpanded.add(id);
-  _dottieFingerprint = '';
-  renderDottieQueue(Object.values(_dottieById).sort((a,b)=>(b.id||0)-(a.id||0)));
+  document.querySelectorAll('.dottie-card[data-aid="'+CSS.escape(id)+'"]').forEach(card => {
+    const body = card.querySelector('.hitl-body');
+    const chev = card.querySelector('.hitl-chevron');
+    const preview = card.querySelector('.dottie-preview');
+    if (body) body.style.display = wasOpen ? 'none' : 'block';
+    if (chev) chev.innerHTML = wasOpen ? '&#9660;' : '&#9650;';
+    if (preview) preview.style.display = wasOpen ? '' : 'none';
+  });
 }
 
 async function exportDottieActivities() {
@@ -1182,7 +1671,7 @@ function renderDecisionLog(d) {
   const el = document.getElementById('decisionLog');
   const countEl = document.getElementById('decisionCount');
   if (!el) return;
-  if (!d||!d.length) { el.innerHTML=emptyState('&#9733;','No decisions yet','The AI decision log populates as Milo acts on opportunities. Each scan cycle evaluates and scores posts.'); if(countEl)countEl.textContent='0'; return; }
+  if (!d||!d.length) { el.innerHTML=emptyState('&#9733;','No decisions yet','The AI decision log populates as Dottie acts on opportunities. Each scan cycle evaluates and scores posts.'); if(countEl)countEl.textContent='0'; return; }
   if (countEl) countEl.textContent = d.length;
   el.innerHTML = d.slice(0,40).map(dec => {
     const ts = dec.timestamp ? dec.timestamp.split(' ').pop().substring(0,5) : '';
@@ -1262,7 +1751,7 @@ function renderCommunities(comms) {
   const statsEl = document.getElementById('commStats');
 
   if (!comms||!comms.length) {
-    if(el) el.innerHTML = emptyState('&#127968;','No managed communities yet','Milo creates and moderates subreddits automatically based on your project targets and hub configuration.');
+    if(el) el.innerHTML = emptyState('&#127968;','No managed communities yet','Dottie creates and moderates subreddits automatically based on your project targets and hub configuration.');
     if(countEl) countEl.textContent = '0';
     const mrH = document.getElementById('mrHubs'); if(mrH) mrH.textContent = '0';
     return;
@@ -1314,7 +1803,7 @@ function renderCommunities(comms) {
 function renderTakeoverTargets(d) {
   const el = document.getElementById('takeoverTargets');
   if (!el) return;
-  if (!d||!d.length) { el.innerHTML=emptyState('&#128269;','No takeover targets','Milo scans for dormant subreddits to take over every 24h. Targets appear when matching subs are found.'); return; }
+  if (!d||!d.length) { el.innerHTML=emptyState('&#128269;','No takeover targets','Dottie scans for dormant subreddits to take over every 24h. Targets appear when matching subs are found.'); return; }
   el.innerHTML = d.map(t => {
     const sc = t.takeover_score||t.score||0;
     const c = sc>=8?'var(--green)':sc>=6?'var(--yellow)':'var(--text3)';
@@ -1330,7 +1819,7 @@ function renderTakeoverTargets(d) {
 function renderTakeoverRequests(d) {
   const el = document.getElementById('takeoverRequests');
   if (!el) return;
-  if (!d||!d.length) { el.innerHTML=emptyState('&#128230;','No takeover requests','Requests are submitted automatically when Milo finds dormant subs that match your projects.'); return; }
+  if (!d||!d.length) { el.innerHTML=emptyState('&#128230;','No takeover requests','Requests are submitted automatically when Dottie finds dormant subs that match your projects.'); return; }
   el.innerHTML = d.map(r => {
     const statusColor = {pending:'var(--yellow)',approved:'var(--green)',denied:'var(--red)'}[r.status]||'var(--text3)';
     const sub = r.subreddit||'';
@@ -1472,7 +1961,7 @@ async function renderNetwork(data) {
 
   const nodes = data.nodes || [];
   const links = data.links || [];
-  if (!nodes.length) { container.innerHTML = emptyState('&#128376;','Network building...','Relationships appear as Milo engages with users across subreddits. This populates over days of activity.'); return; }
+  if (!nodes.length) { container.innerHTML = emptyState('&#128376;','Network building...','Relationships appear as Dottie engages with users across subreddits. This populates over days of activity.'); return; }
 
   container.innerHTML = '';
   const width = container.clientWidth || 800;
@@ -1565,10 +2054,23 @@ async function doControl(action) {
     if (d&&!d.ok) { toast(d.error||'Failed','error'); return; }
     if (action==='pause') paused=true;
     if (action==='resume') paused=false;
-    const bp = document.getElementById('btnPause');
-    const br = document.getElementById('btnResume');
-    if(bp) bp.disabled=paused;
-    if(br) br.disabled=!paused;
+    document.querySelectorAll('#btnPause, #homeBtnPause').forEach(b => { b.disabled = paused; });
+    document.querySelectorAll('#btnResume, #homeBtnResume').forEach(b => { b.disabled = !paused; });
+    if (action==='pause' || action==='resume') {
+      const state = document.getElementById('pulseState');
+      const orb = document.getElementById('pulseOrb');
+      if (state) {
+        state.textContent = paused ? 'Paused' : 'Alive';
+        state.className = 'pulse-state ' + (paused ? 'is-paused' : 'is-live');
+      }
+      if (orb) orb.className = 'pulse-orb status-orb ' + (paused ? 'paused' : 'live');
+    }
+    if (action === 'scan') {
+      applyScanStatus({ state: 'running', running: true, message: 'Scanning…' });
+      toast('Scan started', 'success');
+      refresh();
+      return;
+    }
     toast(action.charAt(0).toUpperCase()+action.slice(1)+' executed','success');
   } catch(e) { toast('Error: '+e.message,'error'); }
 }
@@ -1745,6 +2247,7 @@ function connectWS() {
       _errCount++;
       updateTabBadges({});
       updateGlobalStatusBar({});
+      updatePulseErrors();
       // Error count badge on feed header
       const feedErr = document.getElementById('feedErrCount');
       if (feedErr) { feedErr.textContent = _errCount; feedErr.style.display = 'inline-flex'; }
@@ -1753,9 +2256,20 @@ function connectWS() {
     // Track scan times for global status bar
     const cat = rec.cat || '';
     const msgLower = (rec.msg || '').toLowerCase();
-    if (cat === 'SCAN' || msgLower.includes('scan complete') || msgLower.includes('scanning')) {
-      _lastScanTime = new Date();
-      updateGlobalStatusBar({ lastScan: rec.ts || 'now' });
+    if (cat === 'SCAN' || /\bscan\b/.test(msgLower)) {
+      if (msgLower.includes('already in progress')) {
+        _scanStartedAt = _scanStartedAt || Date.now();
+        applyScanStatus({ state: 'running', running: true, message: 'Scanning…' });
+      } else if (msgLower.includes('scan cycle complete')) {
+        _lastScanTime = new Date();
+        updateGlobalStatusBar({ lastScan: rec.ts || 'now' });
+        applyScanStatus({ state: 'completed', running: false, message: rec.msg || 'Scan completed', finished_at: new Date().toISOString() });
+        if (currentSurface === 'home') refresh();
+      } else if (msgLower.includes('scan aborted') || (rec.level === 'ERROR' && msgLower.includes('scan error'))) {
+        applyScanStatus({ state: 'failed', running: false, message: rec.msg || 'Scan failed', finished_at: new Date().toISOString() });
+      } else if (msgLower.includes('starting scan cycle')) {
+        applyScanStatus({ state: 'running', running: true, message: 'Scanning…' });
+      }
     }
     // Track next action
     if (cat === 'ACT' || msgLower.includes('acting on') || msgLower.includes('selected opportunity')) {
@@ -2163,7 +2677,7 @@ function renderFailurePatterns(data) {
   if (!el) return;
   const items = data.failures || [];
   if (countEl) countEl.textContent = items.length;
-  if (!items.length) { el.innerHTML=emptyState('&#9888;','No failure patterns','Failure analysis runs after comment verification. Patterns emerge once Milo has enough interaction data.'); return; }
+  if (!items.length) { el.innerHTML=emptyState('&#9888;','No failure patterns','Failure analysis runs after comment verification. Patterns emerge once Dottie has enough interaction data.'); return; }
   el.innerHTML = items.map(f => {
     return `<div class="failure-card">
       <div style="display:flex;justify-content:space-between;margin-bottom:4px">
@@ -2220,6 +2734,181 @@ function renderSentimentMap(data) {
 }
 
 // ══════════════════════════════════════════════════════════════
+// DOTTIE CONFIG (draft → Apply)
+// ══════════════════════════════════════════════════════════════
+function _cfgLines(id) {
+  const el = document.getElementById(id);
+  if (!el) return [];
+  return String(el.value || '').split(/\n/).map(s => s.trim()).filter(Boolean);
+}
+function _cfgSetLines(id, arr) {
+  const el = document.getElementById(id);
+  if (el) el.value = (arr || []).join('\n');
+}
+function _cfgNum(id, fallback) {
+  const el = document.getElementById(id);
+  const n = el ? Number(el.value) : NaN;
+  return Number.isFinite(n) ? n : fallback;
+}
+function _readDottieDraft() {
+  const tone = (document.getElementById('cfgTone') || {}).value || 'helpful_casual';
+  return {
+    enabled: !!(document.getElementById('cfgEnabled') || {}).checked,
+    tagline: (document.getElementById('cfgTagline') || {}).value || '',
+    description: (document.getElementById('cfgDescription') || {}).value || '',
+    reddit_subreddits_primary: _cfgLines('cfgSubsPrimary'),
+    reddit_subreddits_secondary: _cfgLines('cfgSubsSecondary'),
+    reddit_keywords: _cfgLines('cfgKeywords'),
+    reddit_exclude_keywords: _cfgLines('cfgExclude'),
+    reddit_comment_style: tone,
+    reddit_min_post_score: _cfgNum('cfgMinPost', 1),
+    reddit_max_post_age_hours: _cfgNum('cfgMaxAge', 168),
+    discovery_enabled: !!(document.getElementById('cfgDiscEnabled') || {}).checked,
+    discovery_min_score: _cfgNum('cfgMinScore', 8),
+    discovery_max_candidates: _cfgNum('cfgMaxCand', 20),
+    discovery_max_results: _cfgNum('cfgMaxResults', 10),
+    discovery_thinking: !!(document.getElementById('cfgDiscThinking') || {}).checked,
+    discovery_max_tokens: _cfgNum('cfgMaxTokens', 1200),
+    tone_style: tone,
+  };
+}
+function _fillDottieForm(d) {
+  const proj = (d && d.project) || {};
+  const reddit = (d && d.reddit) || {};
+  const subs = reddit.target_subreddits || {};
+  const disc = (d && d.opportunity_discovery) || {};
+  const tone = (d && d.tone) || {};
+  const enabled = document.getElementById('cfgEnabled');
+  if (enabled) enabled.checked = proj.enabled !== false;
+  const tag = document.getElementById('cfgTagline');
+  if (tag) tag.value = proj.tagline || '';
+  const desc = document.getElementById('cfgDescription');
+  if (desc) desc.value = (proj.description || '').trim();
+  _cfgSetLines('cfgSubsPrimary', subs.primary || []);
+  _cfgSetLines('cfgSubsSecondary', subs.secondary || []);
+  _cfgSetLines('cfgKeywords', reddit.keywords || []);
+  _cfgSetLines('cfgExclude', reddit.exclude_keywords || []);
+  const discEn = document.getElementById('cfgDiscEnabled');
+  if (discEn) discEn.checked = disc.enabled !== false;
+  const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v == null ? '' : v; };
+  setVal('cfgMinScore', disc.min_dottie_score != null ? disc.min_dottie_score : 8);
+  setVal('cfgMaxCand', disc.max_candidates != null ? disc.max_candidates : 20);
+  setVal('cfgMaxResults', disc.max_results != null ? disc.max_results : 10);
+  const think = document.getElementById('cfgDiscThinking');
+  if (think) think.checked = !!disc.thinking;
+  setVal('cfgMaxTokens', disc.max_tokens != null ? disc.max_tokens : 1200);
+  _syncThinkingWarn();
+  setVal('cfgMinPost', reddit.min_post_score != null ? reddit.min_post_score : 1);
+  setVal('cfgMaxAge', reddit.max_post_age_hours != null ? reddit.max_post_age_hours : 168);
+  setVal('cfgTone', reddit.comment_style || tone.style || 'helpful_casual');
+}
+function _setDottieDirty(on) {
+  _dottieDirty = !!on;
+  const dirty = document.getElementById('dottieDirty');
+  if (dirty) dirty.hidden = !_dottieDirty;
+  const apply = document.getElementById('cfgApply');
+  const discard = document.getElementById('cfgDiscard');
+  if (apply) apply.disabled = !_dottieDirty;
+  if (discard) discard.disabled = !_dottieDirty;
+  const st = document.getElementById('cfgStatus');
+  if (st) st.textContent = _dottieDirty ? 'Unapplied draft' : 'In sync with dottie.yaml';
+}
+function _bindDottieForm() {
+  if (_dottieFormBound) return;
+  const form = document.getElementById('dottieCfgForm');
+  if (!form) return;
+  form.addEventListener('input', () => {
+    _syncThinkingWarn();
+    if (!_dottieSaved) { _setDottieDirty(true); return; }
+    _setDottieDirty(JSON.stringify(_readDottieDraft()) !== JSON.stringify(_dottieSaved));
+  });
+  form.addEventListener('change', () => _syncThinkingWarn());
+  _dottieFormBound = true;
+}
+const THINKING_MIN_TOKENS = 2500;
+function _syncThinkingWarn() {
+  const on = !!(document.getElementById('cfgDiscThinking') || {}).checked;
+  const warn = document.getElementById('cfgThinkingWarn');
+  if (warn) warn.hidden = !on;
+  const extra = document.getElementById('cfgThinkingWarnExtra');
+  if (extra) extra.hidden = !(on && _cfgNum('cfgMaxTokens', 1200) < THINKING_MIN_TOKENS);
+}
+async function loadDottieConfig(force) {
+  _bindDottieForm();
+  if (_dottieDirty && !force) return;
+  try {
+    const d = await api('/api/projects/' + encodeURIComponent(DOTTIE_PROJECT));
+    if (!d || d.detail || d.error) {
+      const st = document.getElementById('cfgStatus');
+      if (st) st.textContent = (d && (d.detail || d.error)) || 'Could not load Dottie project';
+      return;
+    }
+    _fillDottieForm(d);
+    _dottieSaved = _readDottieDraft();
+    _setDottieDirty(false);
+  } catch (e) {
+    const st = document.getElementById('cfgStatus');
+    if (st) st.textContent = e.message || 'Load failed';
+  }
+}
+function discardDottieDraft() {
+  if (!_dottieSaved) { loadDottieConfig(true); return; }
+  _fillDottieForm({
+    project: {
+      enabled: _dottieSaved.enabled,
+      tagline: _dottieSaved.tagline,
+      description: _dottieSaved.description,
+    },
+    reddit: {
+      target_subreddits: {
+        primary: _dottieSaved.reddit_subreddits_primary,
+        secondary: _dottieSaved.reddit_subreddits_secondary,
+      },
+      keywords: _dottieSaved.reddit_keywords,
+      exclude_keywords: _dottieSaved.reddit_exclude_keywords,
+      comment_style: _dottieSaved.reddit_comment_style,
+      min_post_score: _dottieSaved.reddit_min_post_score,
+      max_post_age_hours: _dottieSaved.reddit_max_post_age_hours,
+    },
+    opportunity_discovery: {
+      enabled: _dottieSaved.discovery_enabled,
+      min_dottie_score: _dottieSaved.discovery_min_score,
+      max_candidates: _dottieSaved.discovery_max_candidates,
+      max_results: _dottieSaved.discovery_max_results,
+      thinking: _dottieSaved.discovery_thinking,
+      max_tokens: _dottieSaved.discovery_max_tokens,
+    },
+    tone: { style: _dottieSaved.tone_style },
+  });
+  _setDottieDirty(false);
+}
+async function applyDottieDraft() {
+  const body = _readDottieDraft();
+  if (body.discovery_thinking && body.discovery_max_tokens < THINKING_MIN_TOKENS) {
+    body.discovery_max_tokens = THINKING_MIN_TOKENS;
+    const el = document.getElementById('cfgMaxTokens');
+    if (el) el.value = String(THINKING_MIN_TOKENS);
+    _syncThinkingWarn();
+  }
+  const btn = document.getElementById('cfgApply');
+  if (btn) btn.disabled = true;
+  try {
+    const d = await apiPut('/api/projects/' + encodeURIComponent(DOTTIE_PROJECT), body);
+    if (!d || !d.ok) {
+      toast((d && (d.detail || d.error)) || 'Apply failed', 'error');
+      if (btn) btn.disabled = false;
+      return;
+    }
+    _dottieSaved = body;
+    _setDottieDirty(false);
+    toast('Applied — dottie.yaml updated. Next scan will use this.', 'success');
+  } catch (e) {
+    toast(e.message, 'error');
+    if (btn) btn.disabled = false;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
 // REFRESH LOOP
 // ══════════════════════════════════════════════════════════════
 async function refresh() {
@@ -2230,7 +2919,33 @@ async function refresh() {
     const status = await api('/api/status').catch(()=>null);
     if (status) renderStatus(status);
 
-    if (currentTab === 'command') {
+    if (currentSurface === 'dottie') {
+      // Keep header status live; do not reload the draft form.
+    }
+    else if (currentSurface === 'home') {
+      const [schedule, opps, actions, dottie] = await Promise.allSettled([
+        api('/api/schedule'),
+        api('/api/opportunities?limit=25'),
+        api('/api/actions?platform=reddit&limit=80'),
+        api('/api/dottie/activities?status=queued&limit=40'),
+      ]);
+      const sched = schedule.status==='fulfilled' ? schedule.value : null;
+      renderHomePulse(status || {}, Array.isArray(sched) ? sched : []);
+      if (opps.status==='fulfilled') renderOpps(opps.value);
+      if (actions.status==='fulfilled') {
+        const rows = actions.value;
+        if (Array.isArray(rows)) renderHomeOutcomes(rows);
+        else renderHomeOutcomes([]);
+      } else {
+        renderHomeOutcomes([]);
+      }
+      if (dottie.status==='fulfilled' && Array.isArray(dottie.value)) {
+        renderHomeDottieQueue(dottie.value);
+      } else {
+        renderHomeDottieQueue([]);
+      }
+    }
+    else if (currentTab === 'command') {
       const [stats, minimaps, schedule, history, acctPerf, heatmap, funnel] = await Promise.allSettled([
         api('/api/stats'), api('/api/minimaps'), api('/api/schedule'), api('/api/history?hours=168'),
         api('/api/accounts/reddit/performance'),
@@ -2306,8 +3021,8 @@ async function refresh() {
       if (server.status==='fulfilled') renderServer(server.value);
       if (schedule.status==='fulfilled') renderSchedule(schedule.value, 'scheduleListFull');
     }
-    // Always fetch server stats for global status bar (lightweight)
-    if (currentTab !== 'config') {
+    // Always fetch server stats for global status bar (lightweight) — Engine room only
+    if (currentSurface === 'engine' && currentTab !== 'config') {
       api('/api/server').then(sv => {
         if (sv && !sv.error) {
           const cpu = sv.cpu || {};
@@ -2337,7 +3052,7 @@ async function boot() {
   try {
     const r = await fetch('/api/status', {headers:{'Authorization':'Bearer '+TOKEN}});
     if (r.ok) showDashboard();
-    else { TOKEN=''; localStorage.removeItem('milo_token'); showLogin(); }
+    else { TOKEN=''; localStorage.removeItem('dottie_token'); localStorage.removeItem('milo_token'); showLogin(); }
   } catch(e) { showDashboard(); }
 }
 boot();

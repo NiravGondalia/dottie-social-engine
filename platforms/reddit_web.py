@@ -18,6 +18,7 @@ from typing import List, Dict, Optional, Tuple
 
 import requests
 
+from core.dottie_discovery import discovery_enabled, filter_opportunities, persist_discovery_results
 from platforms.base_platform import BasePlatform
 from core.database import Database
 from core.content_gen import ContentGenerator
@@ -423,19 +424,15 @@ class RedditWebBot(BasePlatform):
         # Dottie (or any project with opportunity_discovery.enabled):
         # keyword net → LLM meetup filter
         try:
-            from core.dottie_discovery import (
-                discovery_enabled,
-                filter_opportunities,
-                persist_discovery_results,
-            )
             if discovery_enabled(project) and opportunities:
                 llm = getattr(self.content_gen, "llm", None)
                 if llm is not None:
-                    keepers = filter_opportunities(llm, opportunities, project)
+                    result = filter_opportunities(llm, opportunities, project)
                     persist_discovery_results(
-                        self.db, opportunities, keepers, project_name
+                        self.db, opportunities, result, project_name
                     )
-                    opportunities = keepers
+                    if result.skip_rejects:
+                        opportunities = result.keepers
                 else:
                     logger.warning("Dottie discovery skipped — no LLM on content_gen")
         except Exception as e:
@@ -473,6 +470,12 @@ class RedditWebBot(BasePlatform):
 
         if self._already_acted(post_id):
             return None
+        existing = self.db.get_opportunity(post_id)
+        if existing:
+            prev = existing.get("status") or ""
+            reason = (existing.get("rejection_reason") or "").lower()
+            if prev == "approved" or (prev == "skipped" and reason.startswith("human")):
+                return None
 
         post_score = post.get("score", 0)
         if post_score < min_score:
